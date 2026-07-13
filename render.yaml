@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: kop-checklists
+    runtime: node
+    plan: starter
+    buildCommand: ""
+    startCommand: node server.js
+    disk:
+      name: kop-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: TZ_NAME
+        value: America/New_York

@@ -1,0 +1,12 @@
+{
+  "name": "kop-checklists",
+  "version": "2.0.0",
+  "description": "King of Pops operations checklist platform — zero dependencies",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
