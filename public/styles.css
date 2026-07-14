@@ -281,3 +281,41 @@ table.grid tr.clickable:hover { background: #fffbf2; }
 }
 .chat-input { display: flex; gap: 8px; padding: 10px 12px; border-top: 2px solid var(--line); align-items: center; }
 .chat-input #msgText { flex: 1; }
+
+/* clock card */
+.clock-card { display: flex; align-items: center; gap: 14px; justify-content: space-between; margin-bottom: 14px; border-left: 6px solid var(--line); }
+.clock-card.on { border-left-color: var(--green); }
+
+/* hamburger + drawer menu */
+.hamburger { border: none; background: #fff; border-radius: 12px; width: 42px; height: 42px; font-size: 19px; box-shadow: var(--shadow); color: var(--ink); }
+.drawer-bg { position: fixed; inset: 0; background: rgba(11,34,64,.45); z-index: 60; opacity: 0; transition: opacity .2s; }
+.drawer-bg.open { opacity: 1; }
+.drawer {
+  position: absolute; top: 0; left: 0; bottom: 0; width: 290px; max-width: 84vw;
+  background: #fff; box-shadow: 4px 0 24px rgba(11,34,64,.18);
+  display: flex; flex-direction: column; padding: 18px 14px;
+  transform: translateX(-100%); transition: transform .2s;
+}
+.drawer-bg.open .drawer { transform: translateX(0); }
+.drawer-head { display: flex; align-items: center; gap: 12px; padding: 4px 10px 16px; border-bottom: 2px solid var(--line); margin-bottom: 10px; }
+.drawer-head img { width: 40px; height: 40px; }
+.drawer-head b { display: block; font-size: 16px; }
+.drawer-head span { color: var(--ink-soft); font-size: 13px; font-weight: 700; }
+.drawer-item {
+  border: none; background: transparent; text-align: left; padding: 13px 12px;
+  font-weight: 800; font-size: 15.5px; color: var(--ink); border-radius: 12px; width: 100%;
+}
+.drawer-item:hover { background: var(--cream); }
+.drawer-item.active { background: var(--ink); color: #fff; }
+.drawer-foot { margin-top: auto; border-top: 2px solid var(--line); padding-top: 8px; }
+.drawer-foot .drawer-item { color: var(--red); }
+
+/* chat list + conversation */
+.chat-row { cursor: pointer; }
+.chat-row:hover { background: #fffbf2; }
+.conv-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+
+/* multiple choice */
+.choice-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.choice-list .choice { flex: 1 1 45%; min-width: 120px; }
+.choice.sel { border-color: var(--teal); background: #dcf2f0; color: var(--teal); }

@@ -137,33 +137,48 @@ async function openNotifications() {
 
 // ---------- shell ----------
 function tabsFor() {
-  if (rank(ME) === 2) return ['dashboard|📊 Dashboard', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'carts|🛒 Carts', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks'];
-  if (rank(ME) === 1) return ['dashboard|📊 Dashboard', 'schedule|🗓️ Schedule', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks'];
-  return ['home|🍭 My checklists', 'chat|💬 Chat'];
+  if (rank(ME) === 2) return ['dashboard|📊 Dashboard', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'carts|📍 Locations', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
+  if (rank(ME) === 1) return ['dashboard|📊 Dashboard', 'schedule|🗓️ Schedule', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
+  return ['home|🍭 My checklists', 'myschedule|🗓️ My shifts', 'chat|💬 Chat'];
 }
 function shell() {
   clearInterval(CHAT_TIMER);
   const tabs = tabsFor();
   if (!TAB || !tabs.some(t => t.startsWith(TAB + '|'))) TAB = tabs[0].split('|')[0];
+  const current = tabs.find(t => t.startsWith(TAB + '|'));
   $app.innerHTML = `
   <div class="rainbow"></div>
   <header class="topbar"><div class="topbar-inner">
-    <div class="brand"><img src="/logo.png" alt="King of Pops"><div><small>Ops Checklists</small></div></div>
+    <button class="hamburger" id="menuBtn">☰</button>
+    <div class="brand"><img src="/logo.png" alt="King of Pops"><div><small>${esc(current ? current.split('|')[1].replace(/^\S+\s/, '') : 'Ops Checklists')}</small></div></div>
     <div class="spacer"></div>
     <button class="bell" id="bellBtn">🔔${UNREAD ? `<span class="dot">${UNREAD}</span>` : ''}</button>
-    <div class="userchip"><b>${esc(ME.name)}</b><span>${LEVELS[ME.level] || ''}</span></div>
-    <button class="btn ghost small" id="logoutBtn">Sign out</button>
   </div></header>
+  <div class="drawer-bg" id="drawerBg" hidden>
+    <nav class="drawer">
+      <div class="drawer-head">
+        <img src="/mark.png" alt="">
+        <div><b>${esc(ME.name)}</b><span>${LEVELS[ME.level] || ''}</span></div>
+      </div>
+      ${tabs.map(t => { const [k, l] = t.split('|'); return `<button class="drawer-item ${TAB === k ? 'active' : ''}" data-tab="${k}">${l}</button>`; }).join('')}
+      <div class="drawer-foot">
+        <button class="drawer-item" id="logoutBtn">🚪 Sign out</button>
+      </div>
+    </nav>
+  </div>
   <div class="container">
-    <div class="tabs">${tabs.map(t => { const [k, l] = t.split('|'); return `<button class="tab ${TAB === k ? 'active' : ''}" data-tab="${k}">${l}</button>`; }).join('')}</div>
     <div id="body"></div>
   </div>`;
+  const drawerBg = document.getElementById('drawerBg');
+  document.getElementById('menuBtn').onclick = () => { drawerBg.hidden = false; requestAnimationFrame(() => drawerBg.classList.add('open')); };
+  const closeDrawer = () => { drawerBg.classList.remove('open'); setTimeout(() => drawerBg.hidden = true, 200); };
+  drawerBg.onclick = e => { if (e.target === drawerBg) closeDrawer(); };
   document.getElementById('logoutBtn').onclick = async () => { await api('/api/logout', { method: 'POST' }); ME = null; renderLogin(); };
   document.getElementById('bellBtn').onclick = openNotifications;
-  document.querySelectorAll('.tab').forEach(b => b.onclick = () => { TAB = b.dataset.tab; shell(); });
+  document.querySelectorAll('.drawer-item[data-tab]').forEach(b => b.onclick = () => { TAB = b.dataset.tab; shell(); });
   refreshBell();
   const body = document.getElementById('body');
-  const views = { dashboard: renderDashboard, schedule: renderSchedule, checklists: renderChecklistAdmin, carts: renderCarts, users: renderUsers, chat: renderChat, mytasks: renderMyTasks, home: renderMyTasks };
+  const views = { dashboard: renderDashboard, schedule: renderSchedule, checklists: renderChecklistAdmin, carts: renderCarts, users: renderUsers, chat: renderChat, mytasks: renderMyTasks, home: renderMyTasks, myschedule: renderMySchedule };
   views[TAB](body);
 }
 
@@ -224,33 +239,131 @@ function bindTaskCards(root, instances, daily, refresh) {
     if (!c.submission) el.onclick = () => openChecklist(c, null, refresh);
   });
 }
+function clockCard(clock) {
+  if (clock.clocked_in) {
+    const mins = Math.max(0, Math.round((Date.now() - new Date(clock.clock_in_at)) / 60000));
+    const dur = mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
+    return `<div class="card clock-card on">
+      <div><b>🟢 Clocked in</b> — ${dur}
+        <div style="color:var(--ink-soft);font-size:13px">
+          ${clock.shift && clock.shift.cart_name ? '📍 ' + esc(clock.shift.cart_name) + ' · ' : ''}since ${fmtTime(clock.clock_in_at)}
+          ${clock.synced_to_square ? ' · ⬛ on the Square clock' : clock.sync_error ? ` · <span style="color:var(--red)">⚠ not synced: ${esc(clock.sync_error)}</span>` : ''}</div></div>
+      <button class="btn danger" id="clockBtn">Clock out</button>
+    </div>`;
+  }
+  return `<div class="card clock-card">
+    <div><b>⏱️ Not clocked in</b>
+      <div style="color:var(--ink-soft);font-size:13px">${clock.shift ? `Shift ${clock.shift.cart_name ? 'at 📍 ' + esc(clock.shift.cart_name) + ' ' : ''}${fmtTime(clock.shift.start_at)} – ${fmtTime(clock.shift.end_at)}` : 'No scheduled shift right now'}</div></div>
+    <button class="btn teal" id="clockBtn">Clock in</button>
+  </div>`;
+}
+async function doClockIn(refresh, details) {
+  try {
+    const r = await api('/api/clock/in', { method: 'POST', json: details || {} });
+    if (r.need_details) {
+      const carts = await api('/api/locations');
+      const bg = modal(`
+        <h2>⏱️ Clock in</h2>
+        <p style="color:var(--ink-soft);font-size:14px;margin:0 0 8px">No scheduled shift found right now — tell us where you're working and until when.</p>
+        <label>Location</label>
+        <select id="ciCart">${carts.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+        <label>Shift ends at</label>
+        <input type="datetime-local" id="ciEnd" value="${localDT(6 * 60)}">
+        <button class="btn teal" id="ciGo" style="width:100%;margin-top:16px">Clock in ✓</button>`);
+      bg.querySelector('#ciGo').onclick = async () => {
+        const cart_id = Number(bg.querySelector('#ciCart').value);
+        const end_at = new Date(bg.querySelector('#ciEnd').value).toISOString();
+        bg.remove();
+        doClockIn(refresh, { cart_id, end_at });
+      };
+      return;
+    }
+    toast(r.sync_error ? 'Clocked in (not synced to Square: ' + r.sync_error + ')' : 'Clocked in — opening checklist is ready ⬛✓');
+    refresh();
+  } catch (e) { toast(e.message, true); }
+}
+async function doClockOut(refresh) {
+  try {
+    const r = await api('/api/clock/out', { method: 'POST' });
+    toast(r.sync_error ? 'Clocked out (Square sync issue: ' + r.sync_error + ')' : 'Clocked out — see you next shift! 🍭');
+    refresh();
+  } catch (e) { toast(e.message, true); refresh(); }
+}
+function bindClock(body, refresh) {
+  const btn = body.querySelector('#clockBtn');
+  if (!btn) return;
+  btn.onclick = () => btn.textContent.includes('out') ? doClockOut(refresh) : doClockIn(refresh);
+}
+
 async function renderMyTasks(body) {
-  const { date, checklists, instances, shift } = await api('/api/today');
+  const [{ date, checklists, instances, shift }, clock] = await Promise.all([api('/api/today'), api('/api/clock')]);
   const all = [...instances, ...checklists];
   const done = instances.filter(i => i.status === 'complete').length + checklists.filter(c => c.submission).length;
-  const shiftBanner = shift ? `
-    <div class="card" style="margin-bottom:14px;display:flex;gap:12px;align-items:center">
-      <div style="font-size:26px">🗓️</div>
-      <div><b>Your shift</b><div style="color:var(--ink-soft);font-size:13px">
-        ${shift.cart_name ? '📍 ' + esc(shift.cart_name) + ' · ' : ''}${fmtTime(shift.start_at)} – ${fmtTime(shift.end_at)}</div></div>
-    </div>` : '';
   body.innerHTML = `
     <div class="section-head"><h2>${prettyDate(date)}</h2><div class="spacer"></div>
       <button class="btn ghost small" id="pickupBtn">⚡ Pick up a shift</button>
       <span class="pill ${done === all.length && all.length ? 'green' : 'teal'}">${done}/${all.length} complete</span></div>
-    ${shiftBanner}
-    ${taskCards(instances, checklists) || `<div class="empty"><div class="big">🏖️</div>Nothing assigned right now. Your opening checklist appears when your shift starts.<br><br>Picked up a shift that's not in the schedule? Use <b>⚡ Pick up a shift</b> above.</div>`}
+    ${clockCard(clock)}
+    ${taskCards(instances, checklists) || `<div class="empty"><div class="big">🏖️</div>Nothing assigned right now. Clock in or wait for your shift — your opening checklist appears automatically.</div>`}
   `;
   bindTaskCards(body, instances, checklists, () => renderMyTasks(body));
+  bindClock(body, () => renderMyTasks(body));
   body.querySelector('#pickupBtn').onclick = () => pickupShift(() => renderMyTasks(body));
+}
+
+// ================= MY SHIFTS =================
+async function renderMySchedule(body) {
+  const { shifts, open_shifts, clock } = await api('/api/myschedule');
+  const byDay = {};
+  shifts.forEach(s => { (byDay[s.date] = byDay[s.date] || []).push(s); });
+  const shiftRows = Object.keys(byDay).sort().map(d => `
+    <div class="subhead">${prettyDate(d)}</div>
+    ${byDay[d].map(s => `
+      <div class="mrow">
+        <div style="font-size:22px">${s.source === 'square' ? '⬛' : s.source === 'pickup' ? '⚡' : '✍️'}</div>
+        <div class="info"><b>${s.cart_name ? esc(s.cart_name) : 'Location TBD'}</b>
+          <span>${fmtTime(s.start_at)} – ${fmtTime(s.end_at)}${s.notes && s.source === 'square' ? ' · “' + esc(s.notes) + '”' : ''}</span></div>
+      </div>`).join('')}`).join('');
+
+  const openRows = open_shifts.map(o => {
+    const when = `${prettyDate(o.date)}, ${fmtTime(o.start_at)} – ${fmtTime(o.end_at)}`;
+    let action;
+    if (o.my_request === 'pending') action = '<span class="pill yellow">Requested ✋</span>';
+    else if (o.my_request === 'approved') action = '<span class="pill green">Approved ✓</span>';
+    else if (o.my_request === 'declined') action = '<span class="pill gray">Not this time</span>';
+    else action = `<button class="btn teal small" data-req="${o.id}">Request 🙋</button>`;
+    return `<div class="mrow">
+      <div style="font-size:22px">✨</div>
+      <div class="info"><b>${o.cart_name ? esc(o.cart_name) : 'Location TBD'}</b>
+        <span>${when}${o.request_count ? ` · ${o.request_count} request${o.request_count > 1 ? 's' : ''}` : ''}</span></div>
+      ${action}
+    </div>`;
+  }).join('');
+
+  body.innerHTML = `
+    ${clockCard(clock)}
+    <div class="section-head" style="margin-top:18px"><h2>🗓️ My upcoming shifts</h2></div>
+    ${shiftRows || '<div class="empty">No upcoming shifts on your schedule.</div>'}
+    <div class="section-head" style="margin-top:24px"><h2>✨ Open shifts up for grabs</h2></div>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 8px">These are published in Square without a person assigned — festivals, extra retail shifts, and more. Request one and your manager will confirm.</p>
+    ${openRows || '<div class="empty">No open shifts right now — check back later!</div>'}
+  `;
+  bindClock(body, () => renderMySchedule(body));
+  body.querySelectorAll('[data-req]').forEach(b => b.onclick = async () => {
+    try {
+      await api('/api/requests', { method: 'POST', json: { open_shift_id: Number(b.dataset.req) } });
+      toast('Requested — your manager has been notified 🙋');
+      renderMySchedule(body);
+    } catch (e) { toast(e.message, true); }
+  });
 }
 
 async function pickupShift(refresh) {
   const carts = await api('/api/locations');
   const bg = modal(`
     <h2>⚡ Pick up a shift</h2>
-    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 8px">Working a shift that isn't assigned to you in the schedule? Pick your cart and when your shift ends — your opening checklist appears right away, and the closing checklist 30 minutes before the end.</p>
-    <label>Cart</label>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 8px">Working a shift that isn't assigned to you in the schedule? Pick your location and when your shift ends — your opening checklist appears right away, and the closing checklist 30 minutes before the end.</p>
+    <label>Location</label>
     <select id="puCart">${carts.map(c => `<option value="${c.id}">${esc(c.name)}${c.category_name ? ' · ' + esc(c.category_name) : ''}</option>`).join('')}</select>
     <label>Shift ends at</label>
     <input type="datetime-local" id="puEnd" value="${localDT(6 * 60)}">
@@ -282,6 +395,11 @@ function openChecklist(c, instanceId, refresh) {
       field = `<div class="choice-row" data-item="${it.id}">
         <button type="button" class="choice" data-v="yes">Yes 👍</button>
         <button type="button" class="choice" data-v="no">No 👎</button></div>`;
+    else if (it.type === 'choice') {
+      const opts = String(it.options || '').split(',').map(s => s.trim()).filter(Boolean);
+      field = `<div class="choice-list" data-item="${it.id}">${opts.map(o =>
+        `<button type="button" class="choice" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div>`;
+    }
     else if (it.type === 'number')
       field = `<input type="number" step="any" data-item="${it.id}" placeholder="${it.unit ? esc(it.unit) : 'Enter a number'}">`;
     else if (it.type === 'text')
@@ -309,6 +427,11 @@ function openChecklist(c, instanceId, refresh) {
     row.querySelectorAll('.choice').forEach(x => x.classList.remove('sel-yes', 'sel-no'));
     b.classList.add(b.dataset.v === 'yes' ? 'sel-yes' : 'sel-no');
     answers[row.dataset.item] = b.dataset.v;
+  }));
+  bg.querySelectorAll('.choice-list').forEach(list => list.querySelectorAll('.choice').forEach(b => b.onclick = () => {
+    list.querySelectorAll('.choice').forEach(x => x.classList.remove('sel'));
+    b.classList.add('sel');
+    answers[list.dataset.item] = b.dataset.v;
   }));
   bg.querySelectorAll('input[type=number],textarea').forEach(el =>
     el.oninput = () => answers[el.dataset.item] = el.value);
@@ -342,7 +465,7 @@ function openChecklist(c, instanceId, refresh) {
 
 // ================= DASHBOARD =================
 async function renderDashboard(body) {
-  if (DASH_TERR === undefined) DASH_TERR = rank(ME) === 1 && ME.territory_id ? ME.territory_id : '';
+  if (DASH_TERR === undefined) DASH_TERR = rank(ME) === 1 && (ME.territory_ids || [])[0] ? ME.territory_ids[0] : '';
   const terrs = await api('/api/territories');
   const params = new URLSearchParams();
   if (DASH_DATE) params.set('date', DASH_DATE);
@@ -418,8 +541,8 @@ async function renderDashboard(body) {
       <div class="card stat c-red"><div class="num">${s.missed}</div><div class="lbl">Missed / overdue</div></div>
       <div class="card stat c-orange"><div class="num">${s.flagged}</div><div class="lbl">Flagged answers</div></div>
     </div>
-    <div class="subhead">🛒 Cart status</div>
-    ${tiles ? `<div class="board">${tiles}</div>` : '<div class="empty">No shifts scheduled this day — carts appear here once shifts exist.</div>'}
+    <div class="subhead">📍 Location status</div>
+    ${tiles ? `<div class="board">${tiles}</div>` : '<div class="empty">No shifts scheduled this day — locations appear here once shifts exist.</div>'}
     <div class="subhead">☀️🌙 Shift checklists</div>
     ${instRows ? `<table class="grid"><tr><th>Checklist</th><th>Cart</th><th>Who</th><th>Window</th><th>Status</th></tr>${instRows}</table>`
       : '<div class="empty">No shift checklists populated this day.</div>'}
@@ -461,15 +584,25 @@ async function openSubmission(id) {
 // ================= SCHEDULE =================
 async function renderSchedule(body) {
   const q = SCHED_DATE ? '?date=' + SCHED_DATE : '';
-  const [{ date, shifts }, sq, users, carts] = await Promise.all([
-    api('/api/shifts' + q), api('/api/square'), api('/api/users'), api('/api/locations')]);
+  const [{ date, shifts }, sq, users, carts, requests] = await Promise.all([
+    api('/api/shifts' + q), api('/api/square'), api('/api/users'), api('/api/locations'),
+    api('/api/requests').catch(() => [])]);
   SCHED_DATE = date;
   const isAdmin = rank(ME) === 2;
+
+  const reqRows = requests.map(r => `
+    <div class="mrow">
+      <div style="font-size:22px">🙋</div>
+      <div class="info"><b>${esc(r.user_name)} → ${r.shift.cart_name ? esc(r.shift.cart_name) : 'Location TBD'}</b>
+        <span>${prettyDate(r.shift.date)}, ${fmtTime(r.shift.start_at)} – ${fmtTime(r.shift.end_at)} · asked ${ago(r.created_at)}</span></div>
+      <button class="btn teal small" data-approve="${r.id}">Approve ✓</button>
+      <button class="btn ghost small" data-decline="${r.id}">Decline</button>
+    </div>`).join('');
 
   const rows = shifts.map(s => `
     <div class="mrow">
       <div style="font-size:22px">${s.source === 'square' ? '⬛' : s.source === 'pickup' ? '⚡' : '✍️'}</div>
-      <div class="info"><b>${esc(s.user_name)} — ${s.cart_name ? esc(s.cart_name) : '<span style="color:var(--red)">❓ no cart matched</span>'}</b>
+      <div class="info"><b>${esc(s.user_name)} — ${s.cart_name ? esc(s.cart_name) : '<span style="color:var(--red)">❓ no location matched</span>'}</b>
         <span>${fmtTime(s.start_at)} – ${fmtTime(s.end_at)} · ${s.source === 'square' ? 'From Square' : s.source === 'pickup' ? 'Picked up in app' : 'Manual'}${s.notes && s.source === 'square' ? ' · “' + esc(s.notes) + '”' : ''}</span></div>
       ${s.source !== 'square' ? `<button class="btn danger small" data-del="${s.id}">Remove</button>` : ''}
     </div>`).join('');
@@ -479,7 +612,7 @@ async function renderSchedule(body) {
       <h3>⬛ Square connection</h3>
       <p style="margin:4px 0 10px;font-size:14px;color:var(--ink-soft)">
         Shifts sync automatically every 10 minutes from Square Shifts.
-        <b>Put the cart name in each shift's notes</b> so the right cart gets matched. Team members match by email.</p>
+        <b>Put the location name in each shift's notes</b> so the right location gets matched. Team members match by email.</p>
       <div style="font-size:14px;margin-bottom:10px">
         Status: ${sq.connected ? `<span class="status-ok">Connected (${sq.token_preview})</span>` : '<span class="status-bad">Not connected</span>'}
         ${sq.last_sync ? ` · Last sync ${ago(sq.last_sync)}` : ''}
@@ -494,11 +627,15 @@ async function renderSchedule(body) {
         ${isAdmin ? `<div style="flex:0 0 auto"><button class="btn small" id="importTeam">👥 Import team from Square</button></div>` : ''}
       </div>
       ${isAdmin ? `<div class="row" style="margin-top:8px">
+        <div style="flex:0 0 auto"><button class="btn ghost small" id="pickLoc">🏦 Payroll location: ${sq.location_id ? 'set ✓' : '<span style="color:var(--red)">not set (needed for clock-in)</span>'}</button></div>
         <div style="flex:0 0 auto"><a class="btn ghost small" href="/api/backup" download style="text-decoration:none;display:inline-block">⬇️ Download backup</a></div>
         <div style="flex:0 0 auto"><button class="btn ghost small" id="restoreBtn">⬆️ Restore backup</button>
           <input type="file" id="restoreFile" accept=".json" hidden></div>
       </div>` : ''}
     </div>
+    ${reqRows ? `<div class="section-head"><h2>🙋 Shift requests</h2></div>
+      <p style="color:var(--ink-soft);font-size:14px;margin:0 0 8px">Approving notifies the person — then <b>assign them the shift in Square scheduling</b> so it lands on their schedule.</p>
+      ${reqRows}` : ''}
     <div class="datebar">
       <button class="btn ghost small" id="prevDay">◀</button>
       <input type="date" id="schedDate" value="${date}">
@@ -513,7 +650,30 @@ async function renderSchedule(body) {
   body.querySelector('#schedDate').onchange = e => setDate(e.target.value);
   body.querySelector('#prevDay').onclick = () => shiftDay(SCHED_DATE, -1, setDate);
   body.querySelector('#nextDay').onclick = () => shiftDay(SCHED_DATE, 1, setDate);
+  body.querySelectorAll('[data-approve]').forEach(b => b.onclick = async () => {
+    try {
+      const r = await api('/api/requests/' + b.dataset.approve + '/decide', { method: 'POST', json: { approve: true } });
+      toast(r.reminder || 'Approved');
+      renderSchedule(body);
+    } catch (e) { toast(e.message, true); }
+  });
+  body.querySelectorAll('[data-decline]').forEach(b => b.onclick = async () => {
+    await api('/api/requests/' + b.dataset.decline + '/decide', { method: 'POST', json: { approve: false } });
+    toast('Declined'); renderSchedule(body);
+  });
   if (isAdmin) {
+    body.querySelector('#pickLoc').onclick = async () => {
+      try {
+        const locs = await api('/api/square/locations');
+        const bg = modal(`<h2>🏦 Payroll location</h2>
+          <p style="color:var(--ink-soft);font-size:14px">Clock-ins are recorded as Square timecards at this location. Pick your main Square location:</p>
+          ${locs.map(l => `<div class="mrow" style="cursor:pointer" data-loc="${esc(l.id)}"><div style="font-size:20px">🏦</div><div class="info"><b>${esc(l.name)}</b></div>${sq.location_id === l.id ? '<span class="pill green">current ✓</span>' : ''}</div>`).join('')}`);
+        bg.querySelectorAll('[data-loc]').forEach(row => row.onclick = async () => {
+          await api('/api/square', { method: 'PUT', json: { location_id: row.dataset.loc } });
+          bg.remove(); toast('Payroll location saved'); renderSchedule(body);
+        });
+      } catch (e) { toast(e.message, true); }
+    };
     const rBtn = body.querySelector('#restoreBtn'), rFile = body.querySelector('#restoreFile');
     rBtn.onclick = () => rFile.click();
     rFile.onchange = async () => {
@@ -564,7 +724,7 @@ async function renderSchedule(body) {
     const bg = modal(`
       <h2>Add shift</h2>
       <label>Teammate</label><select id="shUser">${users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select>
-      <label>Cart</label><select id="shCart"><option value="">— none —</option>${carts.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <label>Location</label><select id="shCart"><option value="">— none —</option>${carts.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
       <div class="row">
         <div><label>Starts</label><input type="datetime-local" id="shStart" value="${date}T12:00"></div>
         <div><label>Ends</label><input type="datetime-local" id="shEnd" value="${date}T20:00"></div>
@@ -603,7 +763,7 @@ async function renderChecklistAdmin(body) {
         <div style="font-size:26px">${c.emoji}</div>
         <div class="info"><b>${esc(c.name)}</b>
           <span>${trigLabel[c.trigger] || c.trigger} ·
-          ${c.location_id ? esc(c.location_name) : c.category_id ? esc(c.category_name) + ' (category)' : 'All carts'} ·
+          ${c.location_id ? esc(c.location_name) : c.category_id ? esc(c.category_name) + ' (category)' : 'All locations'} ·
           ${c.job_role ? esc(c.job_role) : 'All roles'}${c.trigger === 'daily' ? ' · ' + (c.days.split(',').length === 7 ? 'Daily' : c.days.split(',').map(d => DAY_NAMES[d]).join(', ')) + (c.due_time ? ' · due ' + c.due_time : '') : ''} · ${c.items.length} items</span></div>
         <button class="btn ghost small" data-edit="${c.id}">Edit</button>
         <button class="btn danger small" data-del="${c.id}">Delete</button>
@@ -638,7 +798,7 @@ function checklistBuilder(cl, carts, cats, onSave) {
       <option value="daily" ${trigger === 'daily' ? 'selected' : ''}>📅 Daily — on a fixed schedule</option>
     </select>
     <div class="row">
-      <div><label>Cart (specific)</label><select id="clLoc"><option value="">Any cart</option>
+      <div><label>Location (specific)</label><select id="clLoc"><option value="">Any location</option>
         ${carts.map(l => `<option value="${l.id}" ${cl?.location_id === l.id ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></div>
       <div><label>…or category</label><select id="clCat"><option value="">Any category</option>
         ${cats.map(c => `<option value="${c.id}" ${cl?.category_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
@@ -668,7 +828,7 @@ function checklistBuilder(cl, carts, cats, onSave) {
         <div class="drag">≡</div>
         <div class="builder-fields">
           <select data-f="type" data-i="${i}">
-            ${['checkbox|Checkbox', 'yesno|Yes / No', 'number|Number', 'text|Text', 'photo|Photo'].map(o => {
+            ${['checkbox|Checkbox', 'yesno|Yes / No', 'choice|Multiple choice', 'number|Number', 'text|Text', 'photo|Photo'].map(o => {
               const [v, l] = o.split('|'); return `<option value="${v}" ${it.type === v ? 'selected' : ''}>${l}</option>`;
             }).join('')}
           </select>
@@ -677,6 +837,8 @@ function checklistBuilder(cl, carts, cats, onSave) {
             <input data-f="unit" data-i="${i}" value="${esc(it.unit || '')}" placeholder="Unit (°F, ppm…)">
             <input type="number" step="any" data-f="min" data-i="${i}" value="${it.min ?? ''}" placeholder="Min OK">
             <input type="number" step="any" data-f="max" data-i="${i}" value="${it.max ?? ''}" placeholder="Max OK">` : ''}
+          ${it.type === 'choice' ? `
+            <input class="wide" data-f="options" data-i="${i}" value="${esc(it.options || '')}" placeholder="Options, separated by commas (e.g. Full, Half, Empty)">` : ''}
           <button type="button" class="btn ghost mini" data-req="${i}">${it.required ? 'Required ✓' : 'Optional'}</button>
           <button type="button" class="btn ghost mini" data-up="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
           <button type="button" class="btn ghost mini" data-down="${i}" ${i === items.length - 1 ? 'disabled' : ''}>↓</button>
@@ -740,7 +902,7 @@ async function renderCarts(body) {
     const rows = carts.filter(c => c.category_id === cat.id).map(cartRow).join('');
     return `<div class="cat-head"><h3>${esc(cat.name)}</h3>
       <button class="btn ghost mini" data-rencat="${cat.id}" data-name="${esc(cat.name)}">rename</button>
-      <button class="btn ghost mini" data-delcat="${cat.id}">✕</button></div>${rows || '<div class="empty" style="padding:10px">No carts here yet</div>'}`;
+      <button class="btn ghost mini" data-delcat="${cat.id}">✕</button></div>${rows || '<div class="empty" style="padding:10px">Nothing here yet</div>'}`;
   }).join('');
   const uncat = carts.filter(c => !c.category_id).map(cartRow).join('');
   const terrRows = terrs.map(t => `
@@ -755,12 +917,12 @@ async function renderCarts(body) {
   body.innerHTML = `
     <div class="section-head"><h2>Territories</h2><div class="spacer"></div>
       <button class="btn" id="newTerr">+ Add territory</button></div>
-    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 6px">Assign managers to territories in the Team tab. Managers are automatically alerted when checklists in their territory go overdue, and each territory gets its own chat channel.</p>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 6px">Assign managers to territories in the Team menu. Managers are automatically alerted when checklists in their territories go overdue, and each territory gets its own chat channel.</p>
     ${terrRows || '<div class="empty">No territories yet.</div>'}
-    <div class="section-head" style="margin-top:26px"><h2>Carts & Spots</h2><div class="spacer"></div>
+    <div class="section-head" style="margin-top:26px"><h2>Locations</h2><div class="spacer"></div>
       <button class="btn ghost small" id="newCat">+ Category</button>
-      <button class="btn" id="newCart">+ Add cart</button></div>
-    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 6px">Cart names should match what you write in Square shift notes. Extra notifiers (beyond the territory manager) can be set per cart.</p>
+      <button class="btn" id="newCart">+ Add location</button></div>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 6px">Location names should match what you write in Square shift notes. Extra notifiers (beyond the territory manager) can be set per location.</p>
     ${groups}
     ${uncat ? `<div class="cat-head"><h3>Uncategorized</h3></div>${uncat}` : ''}
   `;
@@ -778,7 +940,7 @@ async function renderCarts(body) {
     refresh();
   });
   body.querySelectorAll('[data-delterr]').forEach(b => b.onclick = async () => {
-    if (!confirm('Remove this territory? Its carts stay but lose the territory; its chat channel is deleted.')) return;
+    if (!confirm('Remove this territory? Its locations stay but lose the territory; its chat channel is deleted.')) return;
     await api('/api/territories/' + b.dataset.delterr, { method: 'DELETE' });
     toast('Territory removed'); refresh();
   });
@@ -803,16 +965,16 @@ async function renderCarts(body) {
   body.querySelectorAll('[data-edit]').forEach(b => b.onclick = () =>
     cartForm(carts.find(c => c.id == b.dataset.edit), cats, users, terrs, refresh));
   body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
-    if (!confirm('Remove this cart?')) return;
+    if (!confirm('Remove this location?')) return;
     await api('/api/locations/' + b.dataset.del, { method: 'DELETE' });
-    toast('Cart removed'); refresh();
+    toast('Location removed'); refresh();
   });
 }
 
 function cartForm(cart, cats, users, terrs, onSave) {
   const notifiers = new Set(cart ? cart.notifier_ids : []);
   const bg = modal(`
-    <h2>${cart ? 'Edit' : 'Add'} cart</h2>
+    <h2>${cart ? 'Edit' : 'Add'} location</h2>
     <label>Name (must match Square shift notes)</label><input id="ctName" value="${esc(cart?.name || '')}" placeholder="e.g. Piedmont Park">
     <div class="row">
       <div><label>Category</label><select id="ctCat"><option value="">— none —</option>
@@ -836,7 +998,7 @@ function cartForm(cart, cats, users, terrs, onSave) {
     if (!payload.name) return toast('Give it a name', true);
     try {
       await api(cart ? '/api/locations/' + cart.id : '/api/locations', { method: cart ? 'PUT' : 'POST', json: payload });
-      bg.remove(); toast('Cart saved 🍭'); onSave();
+      bg.remove(); toast('Location saved 🍭'); onSave();
     } catch (e) { toast(e.message, true); }
   };
 }
@@ -853,7 +1015,7 @@ async function renderUsers(body) {
       <div class="mrow">
         <div style="font-size:24px">${u.level === 'admin' ? '👑' : u.level === 'manager' ? '🧭' : '🍭'}</div>
         <div class="info"><b>${esc(u.name)}</b>
-          <span>${esc(u.email)} · ${LEVELS[u.level]}${u.job_role ? ' · ' + esc(u.job_role) : ''}${u.territory_name ? ' · 🗺️ ' + esc(u.territory_name) : ''}${u.location_name ? ' · ' + esc(u.location_name) : ''}${u.square_team_member_id ? ' · ⬛' : ''}</span></div>
+          <span>${esc(u.email)} · ${LEVELS[u.level]}${u.job_role ? ' · ' + esc(u.job_role) : ''}${(u.territory_names || []).length ? ' · 🗺️ ' + u.territory_names.map(esc).join(', ') : ''}${u.location_name ? ' · ' + esc(u.location_name) : ''}${u.square_team_member_id ? ' · ⬛' : ''}</span></div>
         ${canEdit(u) ? `<button class="btn ghost small" data-edit="${u.id}">Edit</button>` : ''}
         ${u.id !== ME.id && canEdit(u) ? `<button class="btn danger small" data-del="${u.id}">Remove</button>` : ''}
       </div>`).join('')}
@@ -887,9 +1049,10 @@ function userForm(u, carts, terrs, onSave) {
     <input id="uPass" type="text" placeholder="6+ characters">
     ${levelField}
     <div id="terrWrap" style="display:none">
-      <label>🗺️ Responsible for territory</label>
-      <select id="uTerr"><option value="">— none —</option>
-        ${terrs.map(t => `<option value="${t.id}" ${u?.territory_id === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
+      <label>🗺️ Responsible for territories (pick any number)</label>
+      <div class="card" style="padding:10px 14px">
+        ${terrs.map(t => `<label class="checkline"><input type="checkbox" data-terr="${t.id}" ${(u?.territory_ids || []).includes(t.id) ? 'checked' : ''}> ${esc(t.name)}</label>`).join('') || '<span style="color:var(--ink-soft);font-size:13px">No territories yet — create them in the Locations section.</span>'}
+      </div>
     </div>
     <div class="row">
       <div><label>Job role (matches checklist role filters)</label><input id="uRole" value="${esc(u?.job_role || '')}" placeholder="e.g. Cart Operator"></div>
@@ -908,7 +1071,7 @@ function userForm(u, carts, terrs, onSave) {
       level: levelSel.value,
       job_role: bg.querySelector('#uRole').value.trim() || null,
       location_id: Number(bg.querySelector('#uLoc').value) || null,
-      territory_id: levelSel.value === 'manager' ? (Number(bg.querySelector('#uTerr').value) || null) : null,
+      territory_ids: levelSel.value === 'manager' ? [...bg.querySelectorAll('[data-terr]:checked')].map(el => Number(el.dataset.terr)) : [],
     };
     const pass = bg.querySelector('#uPass').value;
     if (pass) payload.password = pass;
@@ -921,11 +1084,54 @@ function userForm(u, carts, terrs, onSave) {
 
 // ================= CHAT =================
 async function renderChat(body) {
+  clearInterval(CHAT_TIMER);
+  if (!CHAT_CHANNEL) return renderChatList(body);
+  renderConversation(body);
+}
+
+async function renderChatList(body) {
   const channels = await api('/api/chat/channels');
-  if (!CHAT_CHANNEL || !channels.some(c => c.id === CHAT_CHANNEL)) CHAT_CHANNEL = channels[0] ? channels[0].id : null;
+  const rows = channels.map(c => `
+    <div class="mrow chat-row" data-ch="${c.id}">
+      <div style="font-size:24px">${c.type === 'dm' ? '👤' : c.type === 'territory' ? '🗺️' : '📣'}</div>
+      <div class="info">
+        <b>${c.type === 'dm' ? esc(c.name) : '#' + esc(c.name)}</b>
+        <span>${c.last_preview ? `${c.last_from ? esc(c.last_from) + ': ' : ''}${esc(c.last_preview)}` : 'No messages yet'}</span>
+      </div>
+      <div style="text-align:right;flex-shrink:0">
+        ${c.unread ? `<span class="chip-dot" style="margin-bottom:4px;display:inline-flex">${c.unread}</span><br>` : ''}
+        <span style="font-size:12px;color:var(--ink-soft);font-weight:700">${c.last_at ? ago(c.last_at) : ''}</span>
+      </div>
+    </div>`).join('');
+  body.innerHTML = `
+    <div class="section-head"><h2>💬 Chat</h2><div class="spacer"></div>
+      <button class="btn" id="newDm">+ New message</button></div>
+    ${rows || '<div class="empty"><div class="big">💬</div>No conversations yet.</div>'}`;
+  body.querySelectorAll('[data-ch]').forEach(row => row.onclick = () => {
+    CHAT_CHANNEL = Number(row.dataset.ch); CHAT_LAST_ID = 0;
+    renderChat(body);
+  });
+  body.querySelector('#newDm').onclick = async () => {
+    const list = await api('/api/chat/people');
+    const bg = modal(`<h2>New direct message</h2>
+      ${list.map(x => `<div class="mrow" style="cursor:pointer" data-u="${x.id}"><div style="font-size:20px">${x.level === 'admin' ? '👑' : x.level === 'manager' ? '🧭' : '🍭'}</div><div class="info"><b>${esc(x.name)}</b></div></div>`).join('')}`);
+    bg.querySelectorAll('[data-u]').forEach(row => row.onclick = async () => {
+      const ch = await api('/api/chat/dm', { method: 'POST', json: { user_id: Number(row.dataset.u) } });
+      bg.remove(); CHAT_CHANNEL = ch.id; CHAT_LAST_ID = 0; renderChat(body);
+    });
+  };
+  // keep previews fresh while on the list
+  CHAT_TIMER = setInterval(() => { if (TAB === 'chat' && !CHAT_CHANNEL) renderChatList(body); }, 15000);
+}
+
+async function renderConversation(body) {
+  const { channel } = await api(`/api/chat/messages?channel_id=${CHAT_CHANNEL}&after=999999999`).catch(() => ({ channel: null }));
   body.innerHTML = `
     <div class="chat-wrap">
-      <div class="chat-chips" id="chatChips"></div>
+      <div class="conv-head">
+        <button class="btn ghost small" id="backBtn">← All chats</button>
+        <h2 style="margin:0;font-size:18px">${channel ? (channel.type === 'dm' ? '👤 ' : '#') + esc(channel.name) : ''}</h2>
+      </div>
       <div class="chat-box card">
         <div class="chat-msgs" id="chatMsgs"><div class="empty">Loading…</div></div>
         <div class="chat-input">
@@ -937,32 +1143,10 @@ async function renderChat(body) {
         <div id="attachPreview" style="display:none;padding:6px 12px;font-size:13px;color:var(--ink-soft)"></div>
       </div>
     </div>`;
-
-  const chipsEl = body.querySelector('#chatChips');
+  body.querySelector('#backBtn').onclick = () => { CHAT_CHANNEL = null; CHAT_LAST_ID = 0; renderChat(body); };
   const msgsEl = body.querySelector('#chatMsgs');
   let pendingFile = null;
-
-  function drawChips(chans) {
-    chipsEl.innerHTML = chans.map(c => `
-      <button class="chip ${c.id === CHAT_CHANNEL ? 'active' : ''}" data-ch="${c.id}">
-        ${c.type === 'dm' ? '👤' : '#'} ${esc(c.name)}${c.unread ? ` <span class="chip-dot">${c.unread}</span>` : ''}
-      </button>`).join('') + `<button class="chip" id="newDm">+ DM</button>`;
-    chipsEl.querySelectorAll('[data-ch]').forEach(b => b.onclick = () => {
-      CHAT_CHANNEL = Number(b.dataset.ch); CHAT_LAST_ID = 0;
-      msgsEl.innerHTML = '<div class="empty">Loading…</div>';
-      drawChips(chans); loadMessages(true);
-    });
-    chipsEl.querySelector('#newDm').onclick = async () => {
-      const list = await api('/api/chat/people');
-      const bg = modal(`<h2>New direct message</h2>
-        ${list.map(x => `<div class="mrow" style="cursor:pointer" data-u="${x.id}"><div style="font-size:20px">${x.level === 'admin' ? '👑' : x.level === 'manager' ? '🧭' : '🍭'}</div><div class="info"><b>${esc(x.name)}</b></div></div>`).join('')}`);
-      bg.querySelectorAll('[data-u]').forEach(row => row.onclick = async () => {
-        const ch = await api('/api/chat/dm', { method: 'POST', json: { user_id: Number(row.dataset.u) } });
-        bg.remove(); CHAT_CHANNEL = ch.id; CHAT_LAST_ID = 0; renderChat(body);
-      });
-    };
-  }
-  drawChips(channels);
+  CHAT_LAST_ID = 0;
 
   function msgHtml(m) {
     let fileHtml = '';
