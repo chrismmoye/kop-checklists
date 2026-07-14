@@ -82,6 +82,22 @@ function migrate(d) {
     (d.shifts || []).forEach(s => { if (!s.source) s.source = 'manual'; });
     changed = true;
   }
+  if (d.version < 4) {
+    d.version = 4;
+    d.timecards = d.timecards || [];       // { id, user_id, shift_id, cart_id, square_timecard_id, clock_in_at, clock_out_at, sync_error }
+    d.open_shifts = d.open_shifts || [];   // unassigned published Square shifts: { id, square_id, cart_id, start_at, end_at, date, notes }
+    d.shift_requests = d.shift_requests || []; // { id, open_shift_id, user_id, status: 'pending'|'approved'|'declined', created_at, decided_by }
+    changed = true;
+  }
+  if (d.version < 5) {
+    d.version = 5;
+    // managers can cover multiple territories
+    (d.users || []).forEach(u => {
+      if (!u.territory_ids) u.territory_ids = u.territory_id ? [u.territory_id] : [];
+      delete u.territory_id;
+    });
+    changed = true;
+  }
   if (changed) setTimeout(() => persist(), 0);
 }
 
@@ -110,11 +126,11 @@ function seed() {
       { id: 6, name: 'Catering Cart 1', category_id: 3, territory_id: 2, notifier_ids: [], active: 1 },
     ],
     users: [
-      { id: 1, name: 'Chris Moye', email: 'chris.moye@kingofpops.com', password_hash: hashPassword('popsicle1'), level: 'admin', is_admin: 1, job_role: 'Admin', location_id: null, territory_id: null, square_team_member_id: null, active: 1 },
-      { id: 2, name: 'Morgan Hall', email: 'morgan@kingofpops.com', password_hash: hashPassword('pops1234'), level: 'manager', is_admin: 0, job_role: 'Territory Manager', location_id: null, territory_id: 1, square_team_member_id: null, active: 1 },
-      { id: 3, name: 'Maya Rivera', email: 'maya@kingofpops.com', password_hash: hashPassword('pops1234'), level: 'slinger', is_admin: 0, job_role: 'Cart Operator', location_id: null, territory_id: null, square_team_member_id: null, active: 1 },
-      { id: 4, name: 'Jordan Lee', email: 'jordan@kingofpops.com', password_hash: hashPassword('pops1234'), level: 'slinger', is_admin: 0, job_role: 'Cart Operator', location_id: null, territory_id: null, square_team_member_id: null, active: 1 },
-      { id: 5, name: 'Sam Patel', email: 'sam@kingofpops.com', password_hash: hashPassword('pops1234'), level: 'slinger', is_admin: 0, job_role: 'Kitchen Staff', location_id: 2, territory_id: null, square_team_member_id: null, active: 1 },
+      { id: 1, name: 'Chris Moye', email: 'chris.moye@kingofpops.com', password_hash: hashPassword('popsicle1'), level: 'admin', is_admin: 1, job_role: 'Admin', location_id: null, territory_ids: [], square_team_member_id: null, active: 1 },
+      { id: 2, name: 'Morgan Hall', email: 'morgan@kingofpops.com', password_hash: hashPassword('pops1234'), level: 'manager', is_admin: 0, job_role: 'Territory Manager', location_id: null, territory_ids: [1], square_team_member_id: null, active: 1 },
+      { id: 3, name: 'Maya Rivera', email: 'maya@kingofpops.com', password_hash: hashPassword('pops1234'), level: 'slinger', is_admin: 0, job_role: 'Cart Operator', location_id: null, territory_ids: [], square_team_member_id: null, active: 1 },
+      { id: 4, name: 'Jordan Lee', email: 'jordan@kingofpops.com', password_hash: hashPassword('pops1234'), level: 'slinger', is_admin: 0, job_role: 'Cart Operator', location_id: null, territory_ids: [], square_team_member_id: null, active: 1 },
+      { id: 5, name: 'Sam Patel', email: 'sam@kingofpops.com', password_hash: hashPassword('pops1234'), level: 'slinger', is_admin: 0, job_role: 'Kitchen Staff', location_id: 2, territory_ids: [], square_team_member_id: null, active: 1 },
     ],
     checklists: [
       {
@@ -165,7 +181,11 @@ function seed() {
     ],
     messages: [],     // { id, channel_id, user_id, text, file, file_name, file_type, created_at }
     reads: [],        // { user_id, channel_id, last_read_id }
+    timecards: [],
+    open_shifts: [],
+    shift_requests: [],
   };
+  d.version = 5;
   setTimeout(() => persist(), 0);
   return d;
 }

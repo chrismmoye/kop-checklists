@@ -1,0 +1,12 @@
+{
+  "name": "King of Pops Checklists",
+  "short_name": "KOP Checklists",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FFF8EE",
+  "theme_color": "#F37C20",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

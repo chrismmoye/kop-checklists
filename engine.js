@@ -86,7 +86,7 @@ async function importTeam() {
     const tempPass = 'pops-' + Math.random().toString(36).slice(2, 6);
     data.users.push({
       id: nextId('user'), name, email, password_hash: hashPassword(tempPass),
-      level: 'slinger', is_admin: 0, job_role: jobRole, location_id: null, territory_id: null,
+      level: 'slinger', is_admin: 0, job_role: jobRole, location_id: null, territory_ids: [],
       square_team_member_id: tm.id, active: 1,
     });
     save();
@@ -110,15 +110,15 @@ function matchCart(notes) {
 
 async function syncShifts() {
   const start = new Date(); start.setDate(start.getDate() - 1);
-  const end = new Date(); end.setDate(end.getDate() + 7);
+  const end = new Date(); end.setDate(end.getDate() + 14);
   let cursor;
   const seen = new Set();
+  const seenOpen = new Set();
   do {
     const res = await squareFetch('/v2/labor/scheduled-shifts/search', {
       query: {
         filter: {
           scheduled_shift_statuses: ['PUBLISHED'],
-          assignment_status: 'ASSIGNED',
           workday: {
             match_shifts_by: 'START_AT',
             default_timezone: TZ,
@@ -131,10 +131,25 @@ async function syncShifts() {
     });
     for (const ss of res.scheduled_shifts || []) {
       const det = ss.published_shift_details || ss.draft_shift_details;
-      if (!det || det.is_deleted || !det.team_member_id || !det.start_at || !det.end_at) continue;
+      if (!det || det.is_deleted || !det.start_at || !det.end_at) continue;
+      const cart = matchCart(det.notes);
+      const dateStr = new Date(det.start_at).toLocaleDateString('en-CA', { timeZone: TZ });
+
+      if (!det.team_member_id) {
+        // unassigned published shift -> requestable open shift
+        seenOpen.add(ss.id);
+        let os = data.open_shifts.find(o => o.square_id === ss.id);
+        if (!os) { os = { id: nextId('open_shift'), square_id: ss.id }; data.open_shifts.push(os); }
+        Object.assign(os, {
+          cart_id: cart ? cart.id : null,
+          start_at: new Date(det.start_at).toISOString(), end_at: new Date(det.end_at).toISOString(),
+          date: dateStr, notes: det.notes || '',
+        });
+        continue;
+      }
+
       const user = data.users.find(u => u.active && u.square_team_member_id === det.team_member_id);
       if (!user) continue; // no matching app user (email mismatch)
-      const cart = matchCart(det.notes);
       seen.add(ss.id);
       let shift = data.shifts.find(s => s.square_id === ss.id);
       if (!shift) {
@@ -144,12 +159,15 @@ async function syncShifts() {
       Object.assign(shift, {
         user_id: user.id, cart_id: cart ? cart.id : null,
         start_at: new Date(det.start_at).toISOString(), end_at: new Date(det.end_at).toISOString(),
-        date: new Date(det.start_at).toLocaleDateString('en-CA', { timeZone: TZ }),
+        date: dateStr,
         notes: det.notes || '',
       });
     }
     cursor = res.cursor;
   } while (cursor);
+  // drop open shifts that were assigned/removed in Square or are in the past
+  data.open_shifts = data.open_shifts.filter(o =>
+    seenOpen.has(o.square_id) && new Date(o.end_at).getTime() > Date.now());
   // remove square shifts that disappeared from the schedule (future only, no instances yet)
   const now = Date.now();
   data.shifts = data.shifts.filter(s => {
@@ -244,7 +262,7 @@ function markOverdue() {
       // fall back to admins if nobody would be alerted
       const notifierIds = new Set(cart ? cart.notifier_ids : []);
       if (cart && cart.territory_id) {
-        data.users.filter(u => u.active && u.level === 'manager' && u.territory_id === cart.territory_id)
+        data.users.filter(u => u.active && u.level === 'manager' && (u.territory_ids || []).includes(cart.territory_id))
           .forEach(u => notifierIds.add(u.id));
       }
       if (!notifierIds.size) {
@@ -254,6 +272,73 @@ function markOverdue() {
     }
     save();
   }
+}
+
+// populate instances immediately (clock-in / clock-out time, not schedule time)
+function populateNow(shift, type) {
+  const now = new Date();
+  const created = [];
+  for (const tpl of templatesFor(type, shift)) {
+    const exists = data.instances.find(i => i.shift_id === shift.id && i.type === type && i.checklist_id === tpl.id);
+    if (exists) { created.push(exists); continue; }
+    const inst = {
+      id: nextId('instance'), type, checklist_id: tpl.id, shift_id: shift.id,
+      user_id: shift.user_id, cart_id: shift.cart_id, date: shift.date,
+      populate_at: now.toISOString(),
+      due_at: new Date(now.getTime() + DUE_MINUTES * 60000).toISOString(),
+      status: 'pending', submission_id: null, alerted: 0,
+    };
+    data.instances.push(inst);
+    created.push(inst);
+  }
+  if (created.length) save();
+  return created;
+}
+
+// ---------- Square timecards (clock in/out) ----------
+async function listSquareLocations() {
+  if (!data.settings.square_token) throw new Error('No Square access token configured');
+  const res = await squareFetch('/v2/locations');
+  return (res.locations || []).filter(l => l.status === 'ACTIVE')
+    .map(l => ({ id: l.id, name: l.name }));
+}
+async function getWage(teamMemberId) {
+  try {
+    const res = await squareFetch(`/v2/labor/team-member-wages?team_member_id=${encodeURIComponent(teamMemberId)}`);
+    const w = (res.team_member_wages || [])[0];
+    if (!w) return null;
+    return { title: w.title || null, hourly_rate: w.hourly_rate || null, tip_eligible: w.tip_eligible !== false };
+  } catch { return null; }
+}
+async function clockInSquare(user) {
+  if (!data.settings.square_token) return { error: 'Square not connected' };
+  if (!data.settings.square_location_id) return { error: 'No payroll location chosen (Schedule tab → Square connection)' };
+  if (!user.square_team_member_id) return { error: 'Your account is not linked to Square (email mismatch)' };
+  try {
+    const wage = await getWage(user.square_team_member_id);
+    const timecard = {
+      location_id: data.settings.square_location_id,
+      team_member_id: user.square_team_member_id,
+      start_at: new Date().toISOString(),
+    };
+    if (wage && wage.hourly_rate) timecard.wage = wage;
+    const res = await squareFetch('/v2/labor/timecards', {
+      idempotency_key: require('crypto').randomBytes(16).toString('hex'),
+      timecard,
+    });
+    return { id: res.timecard && res.timecard.id };
+  } catch (e) { return { error: e.message }; }
+}
+async function clockOutSquare(squareTimecardId) {
+  if (!data.settings.square_token || !squareTimecardId) return { error: 'Not synced to Square' };
+  try {
+    const cur = await squareFetch(`/v2/labor/timecards/${encodeURIComponent(squareTimecardId)}`);
+    const tc = cur.timecard;
+    if (!tc) return { error: 'Timecard not found in Square' };
+    tc.end_at = new Date().toISOString();
+    const res = await squareFetch(`/v2/labor/timecards/${encodeURIComponent(squareTimecardId)}`, { timecard: tc }, 'PUT');
+    return { id: res.timecard && res.timecard.id };
+  } catch (e) { return { error: e.message }; }
 }
 
 // ---------- ticker ----------
@@ -273,4 +358,8 @@ function start() {
   setInterval(tick, 60000);
 }
 
-module.exports = { start, tick, syncSquare, importTeam, generateInstances, markOverdue, notify, businessDate, DUE_MINUTES, CLOSING_LEAD_MINUTES };
+module.exports = {
+  start, tick, syncSquare, importTeam, generateInstances, markOverdue, notify, businessDate,
+  populateNow, listSquareLocations, clockInSquare, clockOutSquare,
+  DUE_MINUTES, CLOSING_LEAD_MINUTES,
+};

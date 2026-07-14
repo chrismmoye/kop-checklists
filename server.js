@@ -182,11 +182,163 @@ on('GET', '/api/today', (req, res) => {
   send(res, 200, { date, checklists: daily, instances, shift: myShift ? shiftOut(myShift) : null });
 }, { auth: true });
 
+// ---------- clock in / out (feeds Square timecards) ----------
+function openTimecard(userId) {
+  return data.timecards.find(t => t.user_id === userId && !t.clock_out_at);
+}
+function activeShiftFor(user) {
+  const now = Date.now();
+  return data.shifts
+    .filter(s => s.user_id === user.id &&
+      now >= new Date(s.start_at).getTime() - 45 * 60000 &&
+      now <= new Date(s.end_at).getTime() + 60 * 60000)
+    .sort((a, b) => new Date(a.start_at) - new Date(b.start_at))[0] || null;
+}
+function clockState(user) {
+  const tc = openTimecard(user.id);
+  const shift = tc ? data.shifts.find(s => s.id === tc.shift_id) : activeShiftFor(user);
+  return {
+    clocked_in: !!tc,
+    clock_in_at: tc ? tc.clock_in_at : null,
+    synced_to_square: tc ? !!tc.square_timecard_id : null,
+    sync_error: tc ? tc.sync_error : null,
+    shift: shift ? shiftOut(shift) : null,
+  };
+}
+on('GET', '/api/clock', (req, res) => send(res, 200, clockState(req.user)), { auth: true });
+on('POST', '/api/clock/in', async (req, res) => {
+  const u = req.user;
+  if (openTimecard(u.id)) return send(res, 409, { error: "You're already clocked in" });
+  let shift = activeShiftFor(u);
+  if (!shift) {
+    // no scheduled shift right now -> need cart + end time (pickup)
+    const b = req.body || {};
+    if (!b.cart_id || !b.end_at) return send(res, 200, { need_details: true });
+    const cart = cartById(Number(b.cart_id));
+    const end = new Date(b.end_at);
+    if (!cart) return send(res, 400, { error: 'Pick a location' });
+    if (isNaN(end) || end <= new Date()) return send(res, 400, { error: 'Enter a valid shift end time' });
+    shift = {
+      id: nextId('shift'), square_id: null, source: 'pickup',
+      user_id: u.id, cart_id: cart.id,
+      start_at: new Date().toISOString(), end_at: end.toISOString(),
+      date: businessDate(), notes: 'Clocked in via app',
+    };
+    data.shifts.push(shift); save();
+  }
+  const sq = await engine.clockInSquare(u);
+  const tc = {
+    id: nextId('timecard'), user_id: u.id, shift_id: shift.id, cart_id: shift.cart_id,
+    square_timecard_id: sq.id || null, sync_error: sq.error || null,
+    clock_in_at: new Date().toISOString(), clock_out_at: null,
+  };
+  data.timecards.push(tc); save();
+  engine.populateNow(shift, 'opening'); // opening checklist is required at clock-in
+  send(res, 200, { ok: true, ...clockState(u) });
+}, { auth: true });
+on('POST', '/api/clock/out', async (req, res) => {
+  const u = req.user;
+  const tc = openTimecard(u.id);
+  if (!tc) return send(res, 409, { error: "You're not clocked in" });
+  const shift = data.shifts.find(s => s.id === tc.shift_id);
+  // slingers must finish their checklists before clocking out
+  if (u.level === 'slinger' && shift) {
+    engine.populateNow(shift, 'closing');
+    const blocking = data.instances
+      .filter(i => i.shift_id === shift.id && i.user_id === u.id && i.status !== 'complete')
+      .map(i => (data.checklists.find(c => c.id === i.checklist_id) || {}).name || 'Checklist');
+    if (blocking.length)
+      return send(res, 409, { error: 'Finish your checklists before clocking out: ' + blocking.join(', '), blocking });
+  }
+  const sq = await engine.clockOutSquare(tc.square_timecard_id);
+  tc.clock_out_at = new Date().toISOString();
+  if (sq.error && tc.square_timecard_id) tc.sync_error = sq.error;
+  save();
+  send(res, 200, { ok: true, ...clockState(u), sync_error: sq.error || null });
+}, { auth: true });
+
+// ---------- my schedule + open shifts + requests ----------
+function openShiftOut(o, userId) {
+  const cart = o.cart_id ? cartById(o.cart_id) : null;
+  const reqs = data.shift_requests.filter(r => r.open_shift_id === o.id);
+  const mine = reqs.find(r => r.user_id === userId);
+  return {
+    ...o, cart_name: cart ? cart.name : null,
+    my_request: mine ? mine.status : null,
+    request_count: reqs.filter(r => r.status === 'pending').length,
+  };
+}
+on('GET', '/api/myschedule', (req, res) => {
+  const today = businessDate();
+  const shifts = data.shifts
+    .filter(s => s.user_id === req.user.id && s.date >= today)
+    .sort((a, b) => new Date(a.start_at) - new Date(b.start_at))
+    .slice(0, 30).map(shiftOut);
+  const open = data.open_shifts
+    .filter(o => new Date(o.end_at).getTime() > Date.now())
+    .sort((a, b) => new Date(a.start_at) - new Date(b.start_at))
+    .map(o => openShiftOut(o, req.user.id));
+  send(res, 200, { today, shifts, open_shifts: open, clock: clockState(req.user) });
+}, { auth: true });
+on('POST', '/api/requests', (req, res) => {
+  const o = data.open_shifts.find(x => x.id === Number((req.body || {}).open_shift_id));
+  if (!o) return send(res, 404, { error: 'Open shift not found (it may have been assigned)' });
+  if (data.shift_requests.some(r => r.open_shift_id === o.id && r.user_id === req.user.id))
+    return send(res, 409, { error: 'You already requested this shift' });
+  data.shift_requests.push({
+    id: nextId('request'), open_shift_id: o.id, user_id: req.user.id,
+    status: 'pending', created_at: new Date().toISOString(), decided_by: null,
+  });
+  save();
+  // notify managers of the cart's territory (or admins)
+  const cart = o.cart_id ? cartById(o.cart_id) : null;
+  const when = new Date(o.start_at).toLocaleString('en-US', { timeZone: TZ, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const recipients = new Set();
+  if (cart && cart.territory_id)
+    data.users.filter(x => x.active && x.level === 'manager' && (x.territory_ids || []).includes(cart.territory_id)).forEach(x => recipients.add(x.id));
+  if (!recipients.size) data.users.filter(x => x.active && x.level === 'admin').forEach(x => recipients.add(x.id));
+  recipients.forEach(id => engine.notify(id, `🙋 Shift request`, `${req.user.name} wants ${cart ? cart.name : 'an open shift'} — ${when}`));
+  send(res, 200, { ok: true });
+}, { auth: true });
+on('GET', '/api/requests', (req, res) => {
+  const rows = data.shift_requests
+    .filter(r => r.status === 'pending')
+    .map(r => {
+      const o = data.open_shifts.find(x => x.id === r.open_shift_id);
+      const u = userById(r.user_id);
+      return o && u ? { ...r, user_name: u.name, shift: openShiftOut(o, req.user.id) } : null;
+    }).filter(Boolean)
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  send(res, 200, rows);
+}, { level: 'manager' });
+on('POST', '/api/requests/:id/decide', (req, res) => {
+  const r = data.shift_requests.find(x => x.id === Number(req.params.id));
+  if (!r || r.status !== 'pending') return send(res, 404, { error: 'Request not found or already decided' });
+  const approve = !!(req.body || {}).approve;
+  const o = data.open_shifts.find(x => x.id === r.open_shift_id);
+  const cart = o && o.cart_id ? cartById(o.cart_id) : null;
+  const when = o ? new Date(o.start_at).toLocaleString('en-US', { timeZone: TZ, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  r.status = approve ? 'approved' : 'declined';
+  r.decided_by = req.user.id;
+  if (approve) {
+    engine.notify(r.user_id, '✅ Shift request approved!', `${cart ? cart.name : 'Open shift'} — ${when}. You'll see it in My Shifts once it's assigned in Square.`);
+    // decline other pending requests for the same shift
+    data.shift_requests.filter(x => x.open_shift_id === r.open_shift_id && x.status === 'pending').forEach(x => {
+      x.status = 'declined'; x.decided_by = req.user.id;
+      engine.notify(x.user_id, 'Shift request update', `${cart ? cart.name : 'The open shift'} on ${when} went to someone else this time.`);
+    });
+  } else {
+    engine.notify(r.user_id, 'Shift request update', `Your request for ${cart ? cart.name : 'the open shift'} (${when}) was declined.`);
+  }
+  save();
+  send(res, 200, { ok: true, reminder: approve ? 'Now assign this shift in Square scheduling so it syncs to their schedule.' : null });
+}, { level: 'manager' });
+
 // ---------- pickup shift (any level): self-populate checklists ----------
 on('POST', '/api/shifts/pickup', (req, res) => {
   const b = req.body || {};
   const cart = cartById(Number(b.cart_id));
-  if (!cart) return send(res, 400, { error: 'Pick a cart' });
+  if (!cart) return send(res, 400, { error: 'Pick a location' });
   const end = new Date(b.end_at);
   if (isNaN(end) || end <= new Date()) return send(res, 400, { error: 'Enter a valid shift end time (in the future)' });
   const start = new Date();
@@ -226,6 +378,10 @@ on('POST', '/api/checklists/:id/submit', (req, res) => {
     }
     if (it.type === 'number' && v !== undefined && v !== '' && v !== null && isNaN(Number(v)))
       return send(res, 400, { error: `"${it.label}" must be a number` });
+    if (it.type === 'choice' && v && it.options) {
+      const opts = it.options.split(',').map(x => x.trim()).filter(Boolean);
+      if (!opts.includes(String(v))) return send(res, 400, { error: `Pick one of the options for "${it.label}"` });
+    }
   }
 
   const date = businessDate();
@@ -281,7 +437,7 @@ on('GET', '/api/files/:file', (req, res) => {
 on('GET', '/api/territories', (req, res) => {
   const out = (data.territories || []).map(t => ({
     ...t,
-    manager_names: data.users.filter(u => u.active && u.level === 'manager' && u.territory_id === t.id).map(u => u.name),
+    manager_names: data.users.filter(u => u.active && u.level === 'manager' && (u.territory_ids || []).includes(t.id)).map(u => u.name),
     cart_count: data.locations.filter(l => l.active && l.territory_id === t.id).length,
   }));
   send(res, 200, out);
@@ -307,7 +463,7 @@ on('PUT', '/api/territories/:id', (req, res) => {
 on('DELETE', '/api/territories/:id', (req, res) => {
   const id = Number(req.params.id);
   data.locations.forEach(l => { if (l.territory_id === id) l.territory_id = null; });
-  data.users.forEach(u => { if (u.territory_id === id) u.territory_id = null; });
+  data.users.forEach(u => { if (u.territory_ids) u.territory_ids = u.territory_ids.filter(x => x !== id); });
   const ch = data.channels.find(c => c.type === 'territory' && c.territory_id === id);
   if (ch) { data.messages = data.messages.filter(m => m.channel_id !== ch.id); data.channels = data.channels.filter(c => c.id !== ch.id); }
   data.territories = data.territories.filter(t => t.id !== id);
@@ -333,7 +489,7 @@ on('PUT', '/api/categories/:id', (req, res) => {
 on('DELETE', '/api/categories/:id', (req, res) => {
   const id = Number(req.params.id);
   if (data.locations.some(l => l.active && l.category_id === id))
-    return send(res, 400, { error: 'Move its carts to another category first' });
+    return send(res, 400, { error: 'Move its locations to another category first' });
   data.categories = data.categories.filter(c => c.id !== id); save();
   send(res, 200, { ok: true });
 }, { level: 'admin' });
@@ -345,7 +501,7 @@ on('POST', '/api/locations', (req, res) => {
   const name = String(b.name || '').trim();
   if (!name) return send(res, 400, { error: 'Name required' });
   if (data.locations.some(l => l.active && l.name.toLowerCase() === name.toLowerCase()))
-    return send(res, 400, { error: 'That cart already exists' });
+    return send(res, 400, { error: 'That location already exists' });
   const loc = {
     id: nextId('location'), name, category_id: b.category_id || null, territory_id: b.territory_id || null,
     notifier_ids: (b.notifier_ids || []).map(Number), active: 1,
@@ -376,12 +532,12 @@ on('GET', '/api/users', (req, res) => {
     .map(u => ({
       ...publicUser(u),
       location_name: u.location_id ? (cartById(u.location_id) || {}).name : null,
-      territory_name: u.territory_id ? (terrById(u.territory_id) || {}).name : null,
+      territory_names: (u.territory_ids || []).map(id => (terrById(id) || {}).name).filter(Boolean),
     }));
   send(res, 200, rows);
 }, { level: 'manager' });
 on('POST', '/api/users', (req, res) => {
-  const { name, email, password, level, job_role, location_id, territory_id } = req.body || {};
+  const { name, email, password, level, job_role, location_id, territory_ids } = req.body || {};
   if (!name || !email || !password) return send(res, 400, { error: 'Name, email, and password are required' });
   if (String(password).length < 6) return send(res, 400, { error: 'Password must be 6+ characters' });
   if (data.users.some(u => u.active && u.email.toLowerCase() === String(email).trim().toLowerCase()))
@@ -393,7 +549,7 @@ on('POST', '/api/users', (req, res) => {
     id: nextId('user'), name: String(name).trim(), email: String(email).trim(),
     password_hash: hashPassword(password), level: newLevel, is_admin: newLevel === 'admin' ? 1 : 0,
     job_role: job_role || null, location_id: location_id || null,
-    territory_id: territory_id || null, square_team_member_id: null, active: 1,
+    territory_ids: (territory_ids || []).map(Number), square_team_member_id: null, active: 1,
   };
   data.users.push(u); save();
   send(res, 200, publicUser(u));
@@ -420,7 +576,7 @@ on('PUT', '/api/users/:id', (req, res) => {
   if (b.email != null) { u.email = String(b.email).trim(); u.square_team_member_id = null; }
   if (b.job_role !== undefined) u.job_role = b.job_role || null;
   if (b.location_id !== undefined) u.location_id = b.location_id || null;
-  if (b.territory_id !== undefined) u.territory_id = b.territory_id || null;
+  if (b.territory_ids !== undefined) u.territory_ids = (b.territory_ids || []).map(Number);
   save();
   send(res, 200, { ok: true });
 }, { level: 'manager' });
@@ -441,6 +597,7 @@ function normalizeItems(items) {
   return (items || []).filter(i => i && i.label && String(i.label).trim()).map((it, i) => ({
     id: it.id || null, position: i, type: it.type, label: String(it.label).trim(),
     required: it.required ? 1 : 0, unit: it.unit || null,
+    options: it.options ? String(it.options).trim() : null,
     min: it.min === '' || it.min == null ? null : Number(it.min),
     max: it.max === '' || it.max == null ? null : Number(it.max),
   }));
@@ -527,6 +684,7 @@ on('GET', '/api/square', (req, res) => {
     env: s.square_env || 'production',
     last_sync: s.square_last_sync || null,
     last_error: s.square_last_error || null,
+    location_id: s.square_location_id || null,
     matched_users: data.users.filter(u => u.active && u.square_team_member_id).length,
   });
 }, { level: 'manager' });
@@ -534,8 +692,13 @@ on('PUT', '/api/square', (req, res) => {
   const b = req.body || {};
   if (b.token !== undefined) data.settings.square_token = String(b.token || '').trim() || null;
   if (b.env) data.settings.square_env = b.env === 'sandbox' ? 'sandbox' : 'production';
+  if (b.location_id !== undefined) data.settings.square_location_id = b.location_id || null;
   save();
   send(res, 200, { ok: true });
+}, { level: 'admin' });
+on('GET', '/api/square/locations', async (req, res) => {
+  try { send(res, 200, await engine.listSquareLocations()); }
+  catch (e) { send(res, 400, { error: e.message }); }
 }, { level: 'admin' });
 on('POST', '/api/square/sync', async (req, res) => {
   const result = await engine.syncSquare();
@@ -622,6 +785,8 @@ function channelOut(c, u) {
     id: c.id, name, type: c.type,
     unread: data.messages.filter(m => m.channel_id === c.id && m.id > lastReadId(u.id, c.id) && m.user_id !== u.id).length,
     last_at: last ? last.created_at : null,
+    last_preview: last ? (last.text ? last.text.slice(0, 70) : '📎 ' + (last.file_name || 'File')) : null,
+    last_from: last ? (((userById(last.user_id) || {}).name || '').split(' ')[0] || null) : null,
   };
 }
 // lightweight people list so anyone (incl. slingers) can start a DM
@@ -750,7 +915,7 @@ on('GET', '/api/dashboard', (req, res) => {
     else if (openDone) state = 'open';
     else if (opening.length) state = 'not_opened';
     board.push({
-      cart_id: cartId, cart_name: cart ? cart.name : '❓ No cart matched in shift notes',
+      cart_id: cartId, cart_name: cart ? cart.name : '❓ No location matched in shift notes',
       category_name: cart && cart.category_id ? (catById(cart.category_id) || {}).name : '',
       territory_name: cart && cart.territory_id ? (terrById(cart.territory_id) || {}).name : '',
       state,
