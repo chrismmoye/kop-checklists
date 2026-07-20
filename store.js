@@ -98,6 +98,24 @@ function migrate(d) {
     });
     changed = true;
   }
+  if (d.version < 6) {
+    d.version = 6;
+    // territories can be linked to Square locations; shifts/instances carry a territory
+    (d.territories || []).forEach(t => {
+      if (t.square_location_id === undefined) { t.square_location_id = null; t.square_location_name = null; }
+    });
+    const cartTerr = id => { const c = (d.locations || []).find(l => l.id === id); return c ? c.territory_id : null; };
+    (d.shifts || []).forEach(x => { if (x.territory_id === undefined) x.territory_id = x.cart_id ? cartTerr(x.cart_id) : null; });
+    (d.open_shifts || []).forEach(x => { if (x.territory_id === undefined) x.territory_id = x.cart_id ? cartTerr(x.cart_id) : null; });
+    (d.instances || []).forEach(x => { if (x.territory_id === undefined) x.territory_id = x.cart_id ? cartTerr(x.cart_id) : null; });
+    changed = true;
+  }
+  if (d.version < 7) {
+    d.version = 7;
+    d.announcements = d.announcements || []; // { id, title, body, author_id, pinned, created_at }
+    (d.shifts || []).forEach(x => { if (!x.notes_feed) x.notes_feed = []; }); // { id, user_id, text, file, file_name, file_type, created_at }
+    changed = true;
+  }
   if (changed) setTimeout(() => persist(), 0);
 }
 
@@ -114,8 +132,8 @@ function seed() {
       { id: 3, name: 'Catering Carts' }, { id: 4, name: 'Brick & Mortar' },
     ],
     territories: [
-      { id: 1, name: 'Atlanta — East' },
-      { id: 2, name: 'Atlanta — West' },
+      { id: 1, name: 'Atlanta — East', square_location_id: null, square_location_name: null },
+      { id: 2, name: 'Atlanta — West', square_location_id: null, square_location_name: null },
     ],
     locations: [
       { id: 1, name: 'Ponce City Market Bar', category_id: 4, territory_id: 1, notifier_ids: [1], active: 1 },
@@ -184,8 +202,9 @@ function seed() {
     timecards: [],
     open_shifts: [],
     shift_requests: [],
+    announcements: [],
   };
-  d.version = 5;
+  d.version = 7;
   setTimeout(() => persist(), 0);
   return d;
 }

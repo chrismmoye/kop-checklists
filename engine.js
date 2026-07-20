@@ -95,6 +95,12 @@ async function importTeam() {
   return { created, linked, skipped, total: members.length };
 }
 
+// Territory linked to a Square location (shifts are published per-territory in Square)
+function terrBySquareLoc(locId) {
+  if (!locId) return null;
+  return (data.territories || []).find(t => t.square_location_id === locId) || null;
+}
+
 // Find the cart whose name appears in the shift notes (longest match wins)
 function matchCart(notes) {
   if (!notes) return null;
@@ -140,8 +146,10 @@ async function syncShifts() {
         seenOpen.add(ss.id);
         let os = data.open_shifts.find(o => o.square_id === ss.id);
         if (!os) { os = { id: nextId('open_shift'), square_id: ss.id }; data.open_shifts.push(os); }
+        const terrO = terrBySquareLoc(det.location_id);
         Object.assign(os, {
           cart_id: cart ? cart.id : null,
+          territory_id: (cart && cart.territory_id) || (terrO ? terrO.id : null),
           start_at: new Date(det.start_at).toISOString(), end_at: new Date(det.end_at).toISOString(),
           date: dateStr, notes: det.notes || '',
         });
@@ -156,8 +164,10 @@ async function syncShifts() {
         shift = { id: nextId('shift'), square_id: ss.id, source: 'square' };
         data.shifts.push(shift);
       }
+      const terrS = terrBySquareLoc(det.location_id);
       Object.assign(shift, {
         user_id: user.id, cart_id: cart ? cart.id : null,
+        territory_id: (cart && cart.territory_id) || (terrS ? terrS.id : null),
         start_at: new Date(det.start_at).toISOString(), end_at: new Date(det.end_at).toISOString(),
         date: dateStr,
         notes: det.notes || '',
@@ -235,7 +245,9 @@ function generateInstances() {
         if (exists) continue;
         data.instances.push({
           id: nextId('instance'), type: plan.type, checklist_id: tpl.id, shift_id: shift.id,
-          user_id: shift.user_id, cart_id: shift.cart_id, date: shift.date,
+          user_id: shift.user_id, cart_id: shift.cart_id,
+          territory_id: (shift.cart_id && (cartById(shift.cart_id) || {}).territory_id) || shift.territory_id || null,
+          date: shift.date,
           populate_at: new Date(plan.at).toISOString(),
           due_at: new Date(plan.at + DUE_MINUTES * 60000).toISOString(),
           status: 'pending', submission_id: null, alerted: 0,
@@ -257,12 +269,14 @@ function markOverdue() {
       const tpl = data.checklists.find(c => c.id === inst.checklist_id);
       const worker = userById(inst.user_id);
       const title = `⚠️ Overdue: ${tpl ? tpl.name : 'Checklist'}`;
-      const body = `${worker ? worker.name : 'Unknown'} at ${cart ? cart.name : 'unassigned cart'} — due ${new Date(inst.due_at).toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' })}`;
+      const terrForMsg = inst.territory_id ? (data.territories || []).find(t => t.id === inst.territory_id) : null;
+      const body = `${worker ? worker.name : 'Unknown'} at ${cart ? cart.name : terrForMsg ? terrForMsg.name + ' (territory)' : 'unassigned location'} — due ${new Date(inst.due_at).toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' })}`;
       // recipients: the cart's notifiers + managers responsible for the cart's territory;
       // fall back to admins if nobody would be alerted
       const notifierIds = new Set(cart ? cart.notifier_ids : []);
-      if (cart && cart.territory_id) {
-        data.users.filter(u => u.active && u.level === 'manager' && (u.territory_ids || []).includes(cart.territory_id))
+      const terrId = (cart && cart.territory_id) || inst.territory_id || null;
+      if (terrId) {
+        data.users.filter(u => u.active && u.level === 'manager' && (u.territory_ids || []).includes(terrId))
           .forEach(u => notifierIds.add(u.id));
       }
       if (!notifierIds.size) {
@@ -283,7 +297,9 @@ function populateNow(shift, type) {
     if (exists) { created.push(exists); continue; }
     const inst = {
       id: nextId('instance'), type, checklist_id: tpl.id, shift_id: shift.id,
-      user_id: shift.user_id, cart_id: shift.cart_id, date: shift.date,
+      user_id: shift.user_id, cart_id: shift.cart_id,
+      territory_id: (shift.cart_id && (cartById(shift.cart_id) || {}).territory_id) || shift.territory_id || null,
+      date: shift.date,
       populate_at: now.toISOString(),
       due_at: new Date(now.getTime() + DUE_MINUTES * 60000).toISOString(),
       status: 'pending', submission_id: null, alerted: 0,

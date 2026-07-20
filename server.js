@@ -67,7 +67,12 @@ function cartOut(l) {
 }
 function shiftOut(s) {
   const u = userById(s.user_id), c = s.cart_id ? cartById(s.cart_id) : null;
-  return { ...s, user_name: u ? u.name : '—', cart_name: c ? c.name : null };
+  const t = s.territory_id ? terrById(s.territory_id) : null;
+  const { notes_feed, ...rest } = s;
+  return {
+    ...rest, user_name: u ? u.name : '—', cart_name: c ? c.name : null, territory_name: t ? t.name : null,
+    note_count: (notes_feed || []).length,
+  };
 }
 function instanceOut(i) {
   const tpl = data.checklists.find(c => c.id === i.checklist_id);
@@ -78,7 +83,9 @@ function instanceOut(i) {
     ...i, checklist_name: tpl ? tpl.name : '?', emoji: tpl ? tpl.emoji : '📋',
     items: tpl ? [...tpl.items].sort((a, b) => a.position - b.position) : [],
     description: tpl ? tpl.description : '',
-    cart_name: cart ? cart.name : null, user_name: u ? u.name : '—',
+    cart_name: cart ? cart.name : null,
+    territory_name: i.territory_id ? ((terrById(i.territory_id) || {}).name || null) : null,
+    user_name: u ? u.name : '—',
     completed_at: sub ? sub.completed_at : null,
     flags: sub ? sub.responses.filter(r => r.flagged).length : 0,
   };
@@ -262,8 +269,9 @@ function openShiftOut(o, userId) {
   const cart = o.cart_id ? cartById(o.cart_id) : null;
   const reqs = data.shift_requests.filter(r => r.open_shift_id === o.id);
   const mine = reqs.find(r => r.user_id === userId);
+  const terr = o.territory_id ? terrById(o.territory_id) : null;
   return {
-    ...o, cart_name: cart ? cart.name : null,
+    ...o, cart_name: cart ? cart.name : null, territory_name: terr ? terr.name : null,
     my_request: mine ? mine.status : null,
     request_count: reqs.filter(r => r.status === 'pending').length,
   };
@@ -294,10 +302,12 @@ on('POST', '/api/requests', (req, res) => {
   const cart = o.cart_id ? cartById(o.cart_id) : null;
   const when = new Date(o.start_at).toLocaleString('en-US', { timeZone: TZ, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   const recipients = new Set();
-  if (cart && cart.territory_id)
-    data.users.filter(x => x.active && x.level === 'manager' && (x.territory_ids || []).includes(cart.territory_id)).forEach(x => recipients.add(x.id));
+  const reqTerr = (cart && cart.territory_id) || o.territory_id || null;
+  if (reqTerr)
+    data.users.filter(x => x.active && x.level === 'manager' && (x.territory_ids || []).includes(reqTerr)).forEach(x => recipients.add(x.id));
   if (!recipients.size) data.users.filter(x => x.active && x.level === 'admin').forEach(x => recipients.add(x.id));
-  recipients.forEach(id => engine.notify(id, `🙋 Shift request`, `${req.user.name} wants ${cart ? cart.name : 'an open shift'} — ${when}`));
+  const terrNameForReq = o.territory_id ? ((terrById(o.territory_id) || {}).name || null) : null;
+  recipients.forEach(id => engine.notify(id, `🙋 Shift request`, `${req.user.name} wants ${cart ? cart.name : terrNameForReq ? terrNameForReq + ' (territory)' : 'an open shift'} — ${when}`));
   send(res, 200, { ok: true });
 }, { auth: true });
 on('GET', '/api/requests', (req, res) => {
@@ -344,7 +354,7 @@ on('POST', '/api/shifts/pickup', (req, res) => {
   const start = new Date();
   const shift = {
     id: nextId('shift'), square_id: null, source: 'pickup',
-    user_id: req.user.id, cart_id: cart.id,
+    user_id: req.user.id, cart_id: cart.id, territory_id: cart.territory_id || null,
     start_at: start.toISOString(), end_at: end.toISOString(),
     date: start.toLocaleDateString('en-CA', { timeZone: TZ }), notes: 'Picked up in app',
   };
@@ -370,6 +380,7 @@ on('POST', '/api/checklists/:id/submit', (req, res) => {
   }
 
   for (const it of c.items) {
+    if (!itemVisible(it, c.items, answers)) continue; // hidden by an if/then condition
     const v = answers[it.id];
     if (it.type === 'photo') {
       if (it.required && !photos[it.id]) return send(res, 400, { error: `Photo required: "${it.label}"` });
@@ -404,9 +415,11 @@ on('POST', '/api/checklists/:id/submit', (req, res) => {
     id: nextId('submission'), checklist_id: c.id, location_id: locId, user_id: req.user.id,
     instance_id: instanceId, date, completed_at: new Date().toISOString(),
     responses: sortedItems.map(it => {
-      const raw = answers[it.id];
+      const visible = itemVisible(it, c.items, answers);
+      const raw = visible ? answers[it.id] : null;
       const value = raw != null ? String(raw) : null;
       let flagged = 0;
+      if (!visible) return { item_id: it.id, value: null, photo: null, flagged: 0, skipped: 1 };
       if (it.type === 'number' && value) {
         const n = Number(value);
         if ((it.min != null && n < it.min) || (it.max != null && n > it.max)) flagged = 1;
@@ -454,7 +467,14 @@ on('POST', '/api/territories', (req, res) => {
 on('PUT', '/api/territories/:id', (req, res) => {
   const t = terrById(Number(req.params.id));
   if (!t) return send(res, 404, { error: 'Not found' });
-  t.name = String((req.body || {}).name || t.name).trim();
+  const b = req.body || {};
+  if (b.square_location_id !== undefined) {
+    // one Square location maps to one territory
+    data.territories.forEach(x => { if (x.id !== t.id && x.square_location_id === b.square_location_id) { x.square_location_id = null; x.square_location_name = null; } });
+    t.square_location_id = b.square_location_id || null;
+    t.square_location_name = b.square_location_name || null;
+  }
+  t.name = String(b.name || t.name).trim();
   const ch = data.channels.find(c => c.type === 'territory' && c.territory_id === t.id);
   if (ch) ch.name = t.name;
   save();
@@ -593,11 +613,31 @@ on('DELETE', '/api/users/:id', (req, res) => {
 on('GET', '/api/checklists', (req, res) => {
   send(res, 200, data.checklists.filter(c => c.active).sort((a, b) => a.name.localeCompare(b.name)).map(checklistOut));
 }, { level: 'manager' });
+// convert builder's cond_index (position of controlling item) into a stable cond_item_id
+function resolveConds(items) {
+  items.forEach(it => {
+    if (it.cond_index != null && items[it.cond_index] && it.cond_index !== items.indexOf(it)) {
+      it.cond_item_id = items[it.cond_index].id;
+    } else {
+      it.cond_item_id = null; it.cond_value = it.cond_index != null ? it.cond_value : it.cond_value ?? null;
+      if (it.cond_item_id == null) it.cond_value = null;
+    }
+    delete it.cond_index;
+  });
+}
+function itemVisible(it, items, answers) {
+  if (!it.cond_item_id) return true;
+  const ctrl = items.find(x => x.id === it.cond_item_id);
+  if (!ctrl) return true;
+  return String(answers[ctrl.id] ?? '') === String(it.cond_value ?? '');
+}
 function normalizeItems(items) {
   return (items || []).filter(i => i && i.label && String(i.label).trim()).map((it, i) => ({
     id: it.id || null, position: i, type: it.type, label: String(it.label).trim(),
     required: it.required ? 1 : 0, unit: it.unit || null,
     options: it.options ? String(it.options).trim() : null,
+    cond_index: it.cond_index === '' || it.cond_index == null ? null : Number(it.cond_index),
+    cond_value: it.cond_value != null && String(it.cond_value) !== '' ? String(it.cond_value) : null,
     min: it.min === '' || it.min == null ? null : Number(it.min),
     max: it.max === '' || it.max == null ? null : Number(it.max),
   }));
@@ -614,6 +654,7 @@ on('POST', '/api/checklists', (req, res) => {
     days: b.days || '0,1,2,3,4,5,6', due_time: b.due_time || null, active: 1,
     items: items.map(it => ({ ...it, id: nextId('item') })),
   };
+  resolveConds(c.items);
   data.checklists.push(c); save();
   send(res, 200, checklistOut(c));
 }, { level: 'admin' });
@@ -634,6 +675,7 @@ on('PUT', '/api/checklists/:id', (req, res) => {
     const existing = new Set(c.items.map(i => i.id));
     c.items = normalizeItems(b.items).map(it =>
       it.id && existing.has(it.id) ? it : { ...it, id: nextId('item') });
+    resolveConds(c.items);
   }
   save();
   send(res, 200, checklistOut(c));
@@ -660,6 +702,7 @@ on('POST', '/api/shifts', (req, res) => {
   const shift = {
     id: nextId('shift'), square_id: null, source: 'manual',
     user_id: user.id, cart_id: b.cart_id ? Number(b.cart_id) : null,
+    territory_id: b.cart_id ? ((cartById(Number(b.cart_id)) || {}).territory_id || null) : null,
     start_at: start.toISOString(), end_at: end.toISOString(),
     date: start.toLocaleDateString('en-CA', { timeZone: TZ }), notes: b.notes || '',
   };
@@ -667,6 +710,63 @@ on('POST', '/api/shifts', (req, res) => {
   engine.generateInstances();
   send(res, 200, shiftOut(shift));
 }, { level: 'manager' });
+function shiftDetail(s) {
+  return {
+    ...shiftOut(s),
+    notes_feed: (s.notes_feed || []).map(n => ({ ...n, user_name: (userById(n.user_id) || {}).name || '—' })),
+  };
+}
+function canSeeShift(user, s) { return rank(user) >= 1 || s.user_id === user.id; }
+on('GET', '/api/shifts/:id', (req, res) => {
+  const s = data.shifts.find(x => x.id === Number(req.params.id));
+  if (!s) return send(res, 404, { error: 'Shift not found' });
+  if (!canSeeShift(req.user, s)) return send(res, 403, { error: 'Not your shift' });
+  send(res, 200, shiftDetail(s));
+}, { auth: true });
+on('PUT', '/api/shifts/:id', (req, res) => {
+  const s = data.shifts.find(x => x.id === Number(req.params.id));
+  if (!s) return send(res, 404, { error: 'Shift not found' });
+  const b = req.body || {};
+  if (b.cart_id !== undefined) {
+    const cart = b.cart_id ? cartById(Number(b.cart_id)) : null;
+    s.cart_id = cart ? cart.id : null;
+    if (cart && cart.territory_id) s.territory_id = cart.territory_id;
+    // update this shift's not-yet-completed checklists to the new location
+    data.instances.forEach(i => {
+      if (i.shift_id === s.id && i.status !== 'complete') {
+        i.cart_id = s.cart_id;
+        i.territory_id = (cart && cart.territory_id) || s.territory_id || null;
+      }
+    });
+  }
+  save();
+  send(res, 200, shiftDetail(s));
+}, { level: 'manager' });
+on('POST', '/api/shifts/:id/notes', (req, res) => {
+  const s = data.shifts.find(x => x.id === Number(req.params.id));
+  if (!s) return send(res, 404, { error: 'Shift not found' });
+  if (!canSeeShift(req.user, s)) return send(res, 403, { error: 'Not your shift' });
+  const b = req.body || {};
+  const text = String(b.text || '').trim().slice(0, 2000);
+  let file = null, fileName = null, fileType = null;
+  if (b.file) {
+    try {
+      const saved = saveDataUrl(b.file, b.file_name);
+      if (saved) { file = saved.fname; fileName = String(b.file_name || 'file').slice(0, 120); fileType = saved.mime; }
+    } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (!text && !file) return send(res, 400, { error: 'Add a note or attach a file' });
+  s.notes_feed = s.notes_feed || [];
+  s.notes_feed.push({
+    id: nextId('shiftnote'), user_id: req.user.id, text,
+    file, file_name: fileName, file_type: fileType, created_at: new Date().toISOString(),
+  });
+  save();
+  // let the employee know their shift got info attached (if someone else added it)
+  if (s.user_id && s.user_id !== req.user.id)
+    engine.notify(s.user_id, '📌 Shift info added', `${req.user.name} added ${file ? 'a file' : 'a note'} to your ${new Date(s.start_at).toLocaleDateString('en-US', { timeZone: TZ, weekday: 'short', month: 'short', day: 'numeric' })} shift`);
+  send(res, 200, shiftDetail(s));
+}, { auth: true, bigBody: true });
 on('DELETE', '/api/shifts/:id', (req, res) => {
   const id = Number(req.params.id);
   data.instances = data.instances.filter(i => !(i.shift_id === id && i.status !== 'complete'));
@@ -732,6 +832,38 @@ on('POST', '/api/restore', (req, res) => {
   save();
   send(res, 200, { ok: true, note: 'Data restored. Photos/files are not part of the backup file.' });
 }, { level: 'admin', bigBody: true });
+
+// ---------- announcements ----------
+on('GET', '/api/announcements', (req, res) => {
+  const rows = (data.announcements || [])
+    .sort((a, b) => (b.pinned - a.pinned) || new Date(b.created_at) - new Date(a.created_at))
+    .slice(0, 30)
+    .map(a => ({ ...a, author_name: (userById(a.author_id) || {}).name || '—' }));
+  send(res, 200, rows);
+}, { auth: true });
+on('POST', '/api/announcements', (req, res) => {
+  const b = req.body || {};
+  const title = String(b.title || '').trim(), body = String(b.body || '').trim();
+  if (!title) return send(res, 400, { error: 'Give it a title' });
+  const a = { id: nextId('announcement'), title, body, author_id: req.user.id, pinned: b.pinned ? 1 : 0, created_at: new Date().toISOString() };
+  data.announcements.push(a); save();
+  send(res, 200, a);
+}, { level: 'manager' });
+on('PUT', '/api/announcements/:id', (req, res) => {
+  const a = (data.announcements || []).find(x => x.id === Number(req.params.id));
+  if (!a) return send(res, 404, { error: 'Not found' });
+  const b = req.body || {};
+  if (b.title != null) a.title = String(b.title).trim();
+  if (b.body != null) a.body = String(b.body).trim();
+  if (b.pinned !== undefined) a.pinned = b.pinned ? 1 : 0;
+  save();
+  send(res, 200, { ok: true });
+}, { level: 'manager' });
+on('DELETE', '/api/announcements/:id', (req, res) => {
+  data.announcements = (data.announcements || []).filter(x => x.id !== Number(req.params.id));
+  save();
+  send(res, 200, { ok: true });
+}, { level: 'manager' });
 
 // ---------- notifications ----------
 on('GET', '/api/notifications', (req, res) => {
@@ -895,18 +1027,26 @@ on('GET', '/api/dashboard', (req, res) => {
 
   const daily = dailyRows(date, terrFilter);
   let instances = data.instances.filter(i => i.date === date);
-  if (terrFilter) instances = instances.filter(i => i.cart_id && terrFilter.has(i.cart_id));
+  if (terrFilter) instances = instances.filter(i => (i.cart_id && terrFilter.has(i.cart_id)) || i.territory_id === terrId);
   instances = instances.map(instanceOut);
 
+  // board groups: by exact location when known, else by shift territory
   const board = [];
-  let cartsWithShifts = [...new Set(data.shifts.filter(s => s.date === date).map(s => s.cart_id))];
-  if (terrFilter) cartsWithShifts = cartsWithShifts.filter(id => id && terrFilter.has(id));
-  for (const cartId of cartsWithShifts) {
-    const cart = cartId ? cartById(cartId) : null;
-    const cartInstances = instances.filter(i => i.cart_id === cartId);
-    const opening = cartInstances.filter(i => i.type === 'opening');
-    const closing = cartInstances.filter(i => i.type === 'closing');
-    const shifts = data.shifts.filter(s => s.date === date && s.cart_id === cartId).map(shiftOut);
+  let dayShifts = data.shifts.filter(s => s.date === date);
+  if (terrFilter) dayShifts = dayShifts.filter(s => (s.cart_id && terrFilter.has(s.cart_id)) || s.territory_id === terrId);
+  const groups = new Map();
+  for (const s of dayShifts) {
+    const key = s.cart_id ? 'c' + s.cart_id : 't' + (s.territory_id || 0);
+    if (!groups.has(key)) groups.set(key, { cart_id: s.cart_id, territory_id: s.territory_id || null, shift_ids: [] });
+    groups.get(key).shift_ids.push(s.id);
+  }
+  for (const g of groups.values()) {
+    const cart = g.cart_id ? cartById(g.cart_id) : null;
+    const terr = !cart && g.territory_id ? terrById(g.territory_id) : (cart && cart.territory_id ? terrById(cart.territory_id) : null);
+    const gInstances = instances.filter(i => g.shift_ids.includes(i.shift_id));
+    const opening = gInstances.filter(i => i.type === 'opening');
+    const closing = gInstances.filter(i => i.type === 'closing');
+    const shifts = data.shifts.filter(s => g.shift_ids.includes(s.id)).map(shiftOut);
     const openDone = opening.find(i => i.status === 'complete');
     const closeDone = closing.find(i => i.status === 'complete');
     let state = 'scheduled';
@@ -915,9 +1055,10 @@ on('GET', '/api/dashboard', (req, res) => {
     else if (openDone) state = 'open';
     else if (opening.length) state = 'not_opened';
     board.push({
-      cart_id: cartId, cart_name: cart ? cart.name : '❓ No location matched in shift notes',
+      cart_id: g.cart_id,
+      cart_name: cart ? cart.name : (!g.cart_id && terr) ? '🗺️ ' + terr.name + ' — spot in checklist' : '❓ No location or territory matched',
       category_name: cart && cart.category_id ? (catById(cart.category_id) || {}).name : '',
-      territory_name: cart && cart.territory_id ? (terrById(cart.territory_id) || {}).name : '',
+      territory_name: terr ? terr.name : '',
       state,
       opened_at: openDone ? openDone.completed_at : null,
       opened_by: openDone ? openDone.user_name : null,
@@ -951,7 +1092,7 @@ on('GET', '/api/trend', (req, res) => {
     const date = businessDate(d);
     const daily = dailyRows(date, terrFilter);
     let insts = data.instances.filter(x => x.date === date);
-    if (terrFilter) insts = insts.filter(x => x.cart_id && terrFilter.has(x.cart_id));
+    if (terrFilter) insts = insts.filter(x => (x.cart_id && terrFilter.has(x.cart_id)) || x.territory_id === terrId);
     const total = daily.length + insts.length;
     const complete = daily.filter(r => r.status === 'complete').length + insts.filter(x => x.status === 'complete').length;
     out.push({ date, total, complete, pct: total ? Math.round(100 * complete / total) : 0 });
