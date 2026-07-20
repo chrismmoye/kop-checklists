@@ -207,6 +207,119 @@ function renderLogin() {
   };
 }
 
+// ================= SHIFT DETAIL =================
+async function openShiftDetail(shiftId, refresh) {
+  let s;
+  try { s = await api('/api/shifts/' + shiftId); } catch (e) { return toast(e.message, true); }
+  const canManage = rank(ME) >= 1;
+  const carts = canManage ? await api('/api/locations') : [];
+  const feed = s.notes_feed.map(n => {
+    let fileHtml = '';
+    if (n.file) {
+      fileHtml = (n.file_type || '').startsWith('image/')
+        ? `<a href="/api/photos/${n.file}" target="_blank"><img src="/api/photos/${n.file}" style="max-width:180px;border-radius:10px;display:block;margin-top:4px"></a>`
+        : `<a class="chat-file" href="/api/files/${n.file}?name=${encodeURIComponent(n.file_name || 'file')}" target="_blank">📄 ${esc(n.file_name || 'Download')}</a>`;
+    }
+    return `<div class="notif-row"><b>${esc(n.user_name)} <span style="color:var(--ink-soft);font-weight:700;font-size:12px">· ${ago(n.created_at)}</span></b>
+      ${n.text ? `<span>${esc(n.text)}</span>` : ''}${fileHtml}</div>`;
+  }).join('');
+  const bg = modal(`
+    <h2>🗓️ ${esc(s.user_name)}'s shift</h2>
+    <p style="color:var(--ink-soft);margin:0 0 10px">${prettyDate(s.date)} · ${fmtTime(s.start_at)} – ${fmtTime(s.end_at)}
+      ${s.territory_name ? ' · 🗺️ ' + esc(s.territory_name) : ''}</p>
+    ${canManage ? `
+      <label>📍 Location${s.cart_name ? '' : ' <span style="color:var(--red)">(not set — assign one)</span>'}</label>
+      <div class="row">
+        <div style="flex:3"><select id="sdCart"><option value="">— none —</option>
+          ${carts.map(c => `<option value="${c.id}" ${s.cart_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+        <div style="flex:0 0 auto"><button class="btn small" id="sdSaveCart">Save</button></div>
+      </div>`
+      : `<p><b>📍 ${s.cart_name ? esc(s.cart_name) : 'Location: see your checklist'}</b></p>`}
+    <label>📌 Shift notes & files</label>
+    <div class="card" style="max-height:260px;overflow-y:auto">${feed || '<div class="empty" style="padding:12px">Nothing added yet.</div>'}</div>
+    <div class="row" style="margin-top:10px">
+      <div style="flex:0 0 auto"><button class="btn ghost small" id="sdAttach">📎</button>
+        <input type="file" id="sdFile" hidden></div>
+      <div style="flex:3"><input id="sdText" placeholder="Add a note for this shift…"></div>
+      <div style="flex:0 0 auto"><button class="btn small" id="sdSend">Add</button></div>
+    </div>
+    <div id="sdPreview" style="display:none;font-size:13px;color:var(--ink-soft);margin-top:4px"></div>
+  `);
+  let pendingFile = null;
+  const fileInput = bg.querySelector('#sdFile'), preview = bg.querySelector('#sdPreview');
+  bg.querySelector('#sdAttach').onclick = () => fileInput.click();
+  fileInput.onchange = () => {
+    pendingFile = fileInput.files[0] || null;
+    preview.style.display = pendingFile ? '' : 'none';
+    if (pendingFile) preview.textContent = '📎 ' + pendingFile.name;
+  };
+  bg.querySelector('#sdSend').onclick = async () => {
+    const text = bg.querySelector('#sdText').value.trim();
+    if (!text && !pendingFile) return;
+    const payload = { text };
+    try {
+      if (pendingFile) {
+        payload.file_name = pendingFile.name;
+        payload.file = pendingFile.type.startsWith('image/')
+          ? await compressImage(pendingFile) : await readFileAsDataURL(pendingFile);
+      }
+      await api(`/api/shifts/${s.id}/notes`, { method: 'POST', json: payload });
+      bg.remove(); toast('Added to shift 📌');
+      openShiftDetail(shiftId, refresh);
+    } catch (e) { toast(e.message, true); }
+  };
+  if (canManage) bg.querySelector('#sdSaveCart').onclick = async () => {
+    try {
+      await api('/api/shifts/' + s.id, { method: 'PUT', json: { cart_id: Number(bg.querySelector('#sdCart').value) || null } });
+      bg.remove(); toast('Location saved — pending checklists updated 📍');
+      refresh();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+// ================= ANNOUNCEMENTS =================
+function annCard(an, canManage) {
+  return `<div class="card ann-card ${an.pinned ? 'pinned' : ''}">
+    <div class="ann-head"><b>${an.pinned ? '📌 ' : '📣 '}${esc(an.title)}</b>
+      <span style="color:var(--ink-soft);font-size:12px;font-weight:700">${esc(an.author_name)} · ${ago(an.created_at)}</span></div>
+    ${an.body ? `<div class="ann-body">${esc(an.body)}</div>` : ''}
+    ${canManage ? `<div class="row" style="margin-top:8px">
+      <button class="btn ghost mini" data-annpin="${an.id}" data-pinned="${an.pinned}">${an.pinned ? 'Unpin' : 'Pin 📌'}</button>
+      <button class="btn danger mini" data-anndel="${an.id}">Delete</button></div>` : ''}
+  </div>`;
+}
+function bindAnnouncements(root, refresh) {
+  root.querySelectorAll('[data-anndel]').forEach(b => b.onclick = async () => {
+    if (!confirm('Delete this announcement?')) return;
+    await api('/api/announcements/' + b.dataset.anndel, { method: 'DELETE' });
+    refresh();
+  });
+  root.querySelectorAll('[data-annpin]').forEach(b => b.onclick = async () => {
+    await api('/api/announcements/' + b.dataset.annpin, { method: 'PUT', json: { pinned: b.dataset.pinned !== '1' } });
+    refresh();
+  });
+}
+function postAnnouncement(refresh) {
+  const bg = modal(`
+    <h2>📣 New announcement</h2>
+    <label>Title</label><input id="anTitle" placeholder="e.g. New flavor launch Friday!">
+    <label>Details (optional)</label><textarea id="anBody" rows="4" placeholder="Weekly update, reminders, shout-outs…"></textarea>
+    <label class="checkline" style="margin-top:10px"><input type="checkbox" id="anPin"> 📌 Pin to top</label>
+    <button class="btn teal" id="anGo" style="width:100%;margin-top:14px">Post announcement</button>`);
+  bg.querySelector('#anGo').onclick = async () => {
+    try {
+      await api('/api/announcements', {
+        method: 'POST', json: {
+          title: bg.querySelector('#anTitle').value,
+          body: bg.querySelector('#anBody').value,
+          pinned: bg.querySelector('#anPin').checked,
+        }
+      });
+      bg.remove(); toast('Posted 📣'); refresh();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
 // ================= MY TASKS (all levels) =================
 function taskCards(instances, daily) {
   const instCards = instances.map(i => `
@@ -296,7 +409,8 @@ function bindClock(body, refresh) {
 }
 
 async function renderMyTasks(body) {
-  const [{ date, checklists, instances, shift }, clock] = await Promise.all([api('/api/today'), api('/api/clock')]);
+  const [{ date, checklists, instances, shift }, clock, anns] = await Promise.all([
+    api('/api/today'), api('/api/clock'), api('/api/announcements').catch(() => [])]);
   const all = [...instances, ...checklists];
   const done = instances.filter(i => i.status === 'complete').length + checklists.filter(c => c.submission).length;
   body.innerHTML = `
@@ -304,6 +418,7 @@ async function renderMyTasks(body) {
       <button class="btn ghost small" id="pickupBtn">⚡ Pick up a shift</button>
       <span class="pill ${done === all.length && all.length ? 'green' : 'teal'}">${done}/${all.length} complete</span></div>
     ${clockCard(clock)}
+    ${anns.slice(0, 2).map(an => annCard(an, false)).join('')}
     ${taskCards(instances, checklists) || `<div class="empty"><div class="big">🏖️</div>Nothing assigned right now. Clock in or wait for your shift — your opening checklist appears automatically.</div>`}
   `;
   bindTaskCards(body, instances, checklists, () => renderMyTasks(body));
@@ -319,9 +434,9 @@ async function renderMySchedule(body) {
   const shiftRows = Object.keys(byDay).sort().map(d => `
     <div class="subhead">${prettyDate(d)}</div>
     ${byDay[d].map(s => `
-      <div class="mrow">
+      <div class="mrow chat-row" data-shift="${s.id}">
         <div style="font-size:22px">${s.source === 'square' ? '⬛' : s.source === 'pickup' ? '⚡' : '✍️'}</div>
-        <div class="info"><b>${s.cart_name ? esc(s.cart_name) : 'Location TBD'}</b>
+        <div class="info"><b>${s.cart_name ? esc(s.cart_name) : s.territory_name ? '🗺️ ' + esc(s.territory_name) : 'Location TBD'}${s.note_count ? ` <span class="pill teal">📌 ${s.note_count}</span>` : ''}</b>
           <span>${fmtTime(s.start_at)} – ${fmtTime(s.end_at)}${s.notes && s.source === 'square' ? ' · “' + esc(s.notes) + '”' : ''}</span></div>
       </div>`).join('')}`).join('');
 
@@ -334,7 +449,7 @@ async function renderMySchedule(body) {
     else action = `<button class="btn teal small" data-req="${o.id}">Request 🙋</button>`;
     return `<div class="mrow">
       <div style="font-size:22px">✨</div>
-      <div class="info"><b>${o.cart_name ? esc(o.cart_name) : 'Location TBD'}</b>
+      <div class="info"><b>${o.cart_name ? esc(o.cart_name) : o.territory_name ? '🗺️ ' + esc(o.territory_name) : 'Location TBD'}</b>
         <span>${when}${o.request_count ? ` · ${o.request_count} request${o.request_count > 1 ? 's' : ''}` : ''}</span></div>
       ${action}
     </div>`;
@@ -349,6 +464,8 @@ async function renderMySchedule(body) {
     ${openRows || '<div class="empty">No open shifts right now — check back later!</div>'}
   `;
   bindClock(body, () => renderMySchedule(body));
+  body.querySelectorAll('[data-shift]').forEach(row => row.onclick = () =>
+    openShiftDetail(Number(row.dataset.shift), () => renderMySchedule(body)));
   body.querySelectorAll('[data-req]').forEach(b => b.onclick = async () => {
     try {
       await api('/api/requests', { method: 'POST', json: { open_shift_id: Number(b.dataset.req) } });
@@ -408,7 +525,7 @@ function openChecklist(c, instanceId, refresh) {
       field = `<button type="button" class="photo-drop" data-item="${it.id}">📷 Tap to add photo</button>
         <input type="file" accept="image/*" capture="environment" hidden data-file="${it.id}">`;
     const labelHtml = it.type === 'checkbox' ? '' : `<div class="item-label">${esc(it.label)} ${req} ${range}</div>`;
-    return `<div class="item-row">${labelHtml}${field}</div>`;
+    return `<div class="item-row" data-row="${it.id}"${it.cond_item_id ? ` data-cond-item="${it.cond_item_id}" data-cond-value="${esc(it.cond_value ?? '')}" style="display:none"` : ''}>${labelHtml}${field}</div>`;
   }).join('');
 
   const bg = modal(`
@@ -419,19 +536,28 @@ function openChecklist(c, instanceId, refresh) {
   `);
 
   const answers = {}, photos = {};
+  const updateVisibility = () => {
+    bg.querySelectorAll('[data-cond-item]').forEach(row => {
+      const show = String(answers[row.dataset.condItem] ?? '') === row.dataset.condValue;
+      row.style.display = show ? '' : 'none';
+    });
+  };
   bg.querySelectorAll('.checkbig').forEach(b => b.onclick = () => {
     b.classList.toggle('on');
     answers[b.dataset.item] = b.classList.contains('on') ? 'yes' : '';
+    updateVisibility();
   });
   bg.querySelectorAll('.choice-row').forEach(row => row.querySelectorAll('.choice').forEach(b => b.onclick = () => {
     row.querySelectorAll('.choice').forEach(x => x.classList.remove('sel-yes', 'sel-no'));
     b.classList.add(b.dataset.v === 'yes' ? 'sel-yes' : 'sel-no');
     answers[row.dataset.item] = b.dataset.v;
+    updateVisibility();
   }));
   bg.querySelectorAll('.choice-list').forEach(list => list.querySelectorAll('.choice').forEach(b => b.onclick = () => {
     list.querySelectorAll('.choice').forEach(x => x.classList.remove('sel'));
     b.classList.add('sel');
     answers[list.dataset.item] = b.dataset.v;
+    updateVisibility();
   }));
   bg.querySelectorAll('input[type=number],textarea').forEach(el =>
     el.oninput = () => answers[el.dataset.item] = el.value);
@@ -471,8 +597,8 @@ async function renderDashboard(body) {
   if (DASH_DATE) params.set('date', DASH_DATE);
   if (DASH_TERR) params.set('territory_id', DASH_TERR);
   const trendParams = DASH_TERR ? '&territory_id=' + DASH_TERR : '';
-  const [dash, trend] = await Promise.all([
-    api('/api/dashboard?' + params), api('/api/trend?days=7' + trendParams)]);
+  const [dash, trend, anns] = await Promise.all([
+    api('/api/dashboard?' + params), api('/api/trend?days=7' + trendParams), api('/api/announcements').catch(() => [])]);
   DASH_DATE = dash.date;
   const s = dash.summary;
 
@@ -498,7 +624,7 @@ async function renderDashboard(body) {
     const flag = i.flags ? ` <span class="pill red">⚑ ${i.flags}</span>` : '';
     return `<tr class="${i.submission_id ? 'clickable' : ''}" data-sub="${i.submission_id || ''}">
       <td>${i.emoji} <b>${esc(i.checklist_name)}</b> <span class="pill ${i.type === 'opening' ? 'teal' : 'purple'}">${i.type}</span></td>
-      <td>${esc(i.cart_name || '—')}</td>
+      <td>${esc(i.cart_name || (i.territory_name ? '🗺️ ' + i.territory_name : '—'))}</td>
       <td>${esc(i.user_name)}</td>
       <td>${fmtTime(i.populate_at)} → ${fmtTime(i.due_at)}</td>
       <td>${instPills[i.status] || i.status}${flag}</td></tr>`;
@@ -541,6 +667,9 @@ async function renderDashboard(body) {
       <div class="card stat c-red"><div class="num">${s.missed}</div><div class="lbl">Missed / overdue</div></div>
       <div class="card stat c-orange"><div class="num">${s.flagged}</div><div class="lbl">Flagged answers</div></div>
     </div>
+    <div class="section-head" style="margin-top:4px"><div class="subhead" style="margin:0">📣 Announcements</div><div class="spacer"></div>
+      <button class="btn small" id="newAnn">+ Post</button></div>
+    ${anns.length ? anns.slice(0, 5).map(an => annCard(an, true)).join('') : '<div class="empty" style="padding:14px">Nothing posted yet — share weekly updates here.</div>'}
     <div class="subhead">📍 Location status</div>
     ${tiles ? `<div class="board">${tiles}</div>` : '<div class="empty">No shifts scheduled this day — locations appear here once shifts exist.</div>'}
     <div class="subhead">☀️🌙 Shift checklists</div>
@@ -557,6 +686,8 @@ async function renderDashboard(body) {
   body.querySelector('#prevDay').onclick = () => shiftDay(DASH_DATE, -1, setDate);
   body.querySelector('#nextDay').onclick = () => shiftDay(DASH_DATE, 1, setDate);
   body.querySelector('#terrSel').onchange = e => { DASH_TERR = e.target.value; renderDashboard(body); };
+  body.querySelector('#newAnn').onclick = () => postAnnouncement(() => renderDashboard(body));
+  bindAnnouncements(body, () => renderDashboard(body));
   body.querySelectorAll('tr.clickable').forEach(tr => tr.onclick = () => tr.dataset.sub && openSubmission(tr.dataset.sub));
 }
 function shiftDay(from, n, cb) {
@@ -566,7 +697,7 @@ function shiftDay(from, n, cb) {
 
 async function openSubmission(id) {
   const s = await api('/api/submissions/' + id);
-  const rows = s.responses.map(r => {
+  const rows = s.responses.filter(r => !r.skipped).map(r => {
     let a = '—';
     if (r.photo) a = `<img src="/api/photos/${r.photo}" alt="photo">`;
     else if (r.type === 'checkbox') a = r.value === 'yes' ? '✅ Done' : '⬜ Not done';
@@ -600,10 +731,10 @@ async function renderSchedule(body) {
     </div>`).join('');
 
   const rows = shifts.map(s => `
-    <div class="mrow">
+    <div class="mrow chat-row" data-shift="${s.id}">
       <div style="font-size:22px">${s.source === 'square' ? '⬛' : s.source === 'pickup' ? '⚡' : '✍️'}</div>
-      <div class="info"><b>${esc(s.user_name)} — ${s.cart_name ? esc(s.cart_name) : '<span style="color:var(--red)">❓ no location matched</span>'}</b>
-        <span>${fmtTime(s.start_at)} – ${fmtTime(s.end_at)} · ${s.source === 'square' ? 'From Square' : s.source === 'pickup' ? 'Picked up in app' : 'Manual'}${s.notes && s.source === 'square' ? ' · “' + esc(s.notes) + '”' : ''}</span></div>
+      <div class="info"><b>${esc(s.user_name)} — ${s.cart_name ? esc(s.cart_name) : s.territory_name ? '🗺️ ' + esc(s.territory_name) : '<span style="color:var(--red)">❓ no location or territory</span>'}${s.note_count ? ` <span class="pill teal">📌 ${s.note_count}</span>` : ''}</b>
+        <span>${fmtTime(s.start_at)} – ${fmtTime(s.end_at)} · ${s.source === 'square' ? 'From Square' : s.source === 'pickup' ? 'Picked up in app' : 'Manual'}${s.notes && s.source === 'square' ? ' · “' + esc(s.notes) + '”' : ''} · tap for details</span></div>
       ${s.source !== 'square' ? `<button class="btn danger small" data-del="${s.id}">Remove</button>` : ''}
     </div>`).join('');
 
@@ -744,7 +875,12 @@ async function renderSchedule(body) {
       } catch (e) { toast(e.message, true); }
     };
   };
-  body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+  body.querySelectorAll('[data-shift]').forEach(row => row.onclick = e => {
+    if (e.target.closest('[data-del]')) return;
+    openShiftDetail(Number(row.dataset.shift), () => renderSchedule(body));
+  });
+  body.querySelectorAll('[data-del]').forEach(b => b.onclick = async e => {
+    e.stopPropagation();
     if (!confirm('Remove this shift (and its pending checklists)?')) return;
     await api('/api/shifts/' + b.dataset.del, { method: 'DELETE' });
     toast('Shift removed'); renderSchedule(body);
@@ -781,6 +917,13 @@ async function renderChecklistAdmin(body) {
 
 function checklistBuilder(cl, carts, cats, onSave) {
   const items = cl ? cl.items.map(i => ({ ...i })) : [{ type: 'checkbox', label: '', required: 1 }];
+  // convert stored cond_item_id -> positional cond_index for editing
+  items.forEach(it => {
+    if (it.cond_item_id != null) {
+      const idx = items.findIndex(x => x.id === it.cond_item_id);
+      it.cond_index = idx >= 0 ? idx : null;
+    }
+  });
   let days = (cl ? cl.days : '0,1,2,3,4,5,6').split(',');
   let trigger = cl ? cl.trigger : 'opening';
 
@@ -843,6 +986,23 @@ function checklistBuilder(cl, carts, cats, onSave) {
           <button type="button" class="btn ghost mini" data-up="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
           <button type="button" class="btn ghost mini" data-down="${i}" ${i === items.length - 1 ? 'disabled' : ''}>↓</button>
           <button type="button" class="btn danger mini" data-rm="${i}">✕</button>
+          ${(() => {
+            // controlling items must be ABOVE this one and answerable (choice / yes-no)
+            const ctrls = items.map((x, xi) => ({ x, xi })).filter(({ x, xi }) => xi < i && (x.type === 'choice' || x.type === 'yesno') && x.label);
+            if (!ctrls.length) return '';
+            const ctrlSel = `<select data-condi="${i}" style="flex:2;min-width:150px">
+              <option value="">Always shown</option>
+              ${ctrls.map(({ x, xi }) => `<option value="${xi}" ${it.cond_index === xi ? 'selected' : ''}>If “${esc(x.label.slice(0, 30))}”…</option>`).join('')}</select>`;
+            let valSel = '';
+            if (it.cond_index != null && items[it.cond_index]) {
+              const ctrl = items[it.cond_index];
+              const opts = ctrl.type === 'yesno' ? ['yes', 'no'] : String(ctrl.options || '').split(',').map(s => s.trim()).filter(Boolean);
+              valSel = `<select data-condv="${i}" style="flex:1;min-width:100px">
+                ${opts.map(o => `<option value="${esc(o)}" ${String(it.cond_value) === o ? 'selected' : ''}>= ${esc(o)}</option>`).join('')}</select>`;
+            }
+            return `<div class="wide" style="display:flex;gap:6px;align-items:center;background:var(--cream);border-radius:10px;padding:6px 8px">
+              <span style="font-size:12px;font-weight:800;color:var(--ink-soft)">🔀</span>${ctrlSel}${valSel}</div>`;
+          })()}
         </div>
       </div>`).join('');
     itemsEl.querySelectorAll('[data-f]').forEach(el => el.onchange = () => {
@@ -850,10 +1010,25 @@ function checklistBuilder(cl, carts, cats, onSave) {
       it[el.dataset.f] = el.value === '' ? null : (el.dataset.f === 'min' || el.dataset.f === 'max' ? Number(el.value) : el.value);
       if (el.dataset.f === 'type') drawItems();
     });
+    itemsEl.querySelectorAll('[data-condi]').forEach(el => el.onchange = () => {
+      const it = items[el.dataset.condi];
+      it.cond_index = el.value === '' ? null : Number(el.value);
+      if (it.cond_index != null) {
+        const ctrl = items[it.cond_index];
+        const opts = ctrl.type === 'yesno' ? ['yes', 'no'] : String(ctrl.options || '').split(',').map(s => s.trim()).filter(Boolean);
+        it.cond_value = opts[0] || null;
+      } else it.cond_value = null;
+      drawItems();
+    });
+    itemsEl.querySelectorAll('[data-condv]').forEach(el => el.onchange = () => { items[el.dataset.condv].cond_value = el.value; });
     itemsEl.querySelectorAll('[data-req]').forEach(el => el.onclick = () => { const it = items[el.dataset.req]; it.required = it.required ? 0 : 1; drawItems(); });
-    itemsEl.querySelectorAll('[data-rm]').forEach(el => el.onclick = () => { items.splice(el.dataset.rm, 1); drawItems(); });
-    itemsEl.querySelectorAll('[data-up]').forEach(el => el.onclick = () => { const i = +el.dataset.up; [items[i - 1], items[i]] = [items[i], items[i - 1]]; drawItems(); });
-    itemsEl.querySelectorAll('[data-down]').forEach(el => el.onclick = () => { const i = +el.dataset.down; [items[i + 1], items[i]] = [items[i], items[i + 1]]; drawItems(); });
+    const fixConds = () => items.forEach(x => {
+      if (x.cond_index != null && (!items[x.cond_index] || items.indexOf(x) <= x.cond_index ||
+        !(items[x.cond_index].type === 'choice' || items[x.cond_index].type === 'yesno'))) { x.cond_index = null; x.cond_value = null; }
+    });
+    itemsEl.querySelectorAll('[data-rm]').forEach(el => el.onclick = () => { items.splice(el.dataset.rm, 1); items.forEach(x => { if (x.cond_index != null && x.cond_index >= items.length) { x.cond_index = null; x.cond_value = null; } }); fixConds(); drawItems(); });
+    itemsEl.querySelectorAll('[data-up]').forEach(el => el.onclick = () => { const i = +el.dataset.up; [items[i - 1], items[i]] = [items[i], items[i - 1]]; fixConds(); drawItems(); });
+    itemsEl.querySelectorAll('[data-down]').forEach(el => el.onclick = () => { const i = +el.dataset.down; [items[i + 1], items[i]] = [items[i], items[i + 1]]; fixConds(); drawItems(); });
   }
   drawItems();
   bg.querySelector('#addItem').onclick = () => { items.push({ type: 'checkbox', label: '', required: 1 }); drawItems(); };
@@ -909,7 +1084,9 @@ async function renderCarts(body) {
     <div class="mrow">
       <div style="font-size:22px">🗺️</div>
       <div class="info"><b>${esc(t.name)}</b>
-        <span>${t.cart_count} carts · Managers: ${t.manager_names.length ? t.manager_names.map(esc).join(', ') : '<span style="color:var(--red)">none assigned</span>'}</span></div>
+        <span>${t.cart_count} locations · Managers: ${t.manager_names.length ? t.manager_names.map(esc).join(', ') : '<span style="color:var(--red)">none assigned</span>'} ·
+        ⬛ ${t.square_location_name ? esc(t.square_location_name) : '<span style="color:var(--red)">no Square location linked</span>'}</span></div>
+      <button class="btn teal small" data-sqterr="${t.id}">⬛ Link Square</button>
       <button class="btn ghost small" data-renterr="${t.id}" data-name="${esc(t.name)}">Rename</button>
       <button class="btn danger small" data-delterr="${t.id}">Remove</button>
     </div>`).join('');
@@ -933,6 +1110,21 @@ async function renderCarts(body) {
     await api('/api/territories', { method: 'POST', json: { name } });
     toast('Territory added (chat channel created too)'); refresh();
   };
+  body.querySelectorAll('[data-sqterr]').forEach(b => b.onclick = async () => {
+    try {
+      const locs = await api('/api/square/locations');
+      const bg = modal(`<h2>⬛ Link Square location</h2>
+        <p style="color:var(--ink-soft);font-size:14px">Shifts published at this Square location will automatically belong to this territory — no notes needed.</p>
+        ${locs.map(l => `<div class="mrow" style="cursor:pointer" data-loc="${esc(l.id)}" data-locname="${esc(l.name)}"><div style="font-size:20px">⬛</div><div class="info"><b>${esc(l.name)}</b></div></div>`).join('')}
+        <button class="btn ghost small" id="unlink" style="margin-top:8px">Unlink</button>`);
+      const doLink = async (locId, locName) => {
+        await api('/api/territories/' + b.dataset.sqterr, { method: 'PUT', json: { square_location_id: locId, square_location_name: locName } });
+        bg.remove(); toast(locId ? 'Linked — shifts at that Square location now map here' : 'Unlinked'); refresh();
+      };
+      bg.querySelectorAll('[data-loc]').forEach(row => row.onclick = () => doLink(row.dataset.loc, row.dataset.locname));
+      bg.querySelector('#unlink').onclick = () => doLink(null, null);
+    } catch (e) { toast(e.message, true); }
+  });
   body.querySelectorAll('[data-renterr]').forEach(b => b.onclick = async () => {
     const name = prompt('Rename territory', b.dataset.name);
     if (!name) return;

@@ -319,3 +319,9 @@ table.grid tr.clickable:hover { background: #fffbf2; }
 .choice-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .choice-list .choice { flex: 1 1 45%; min-width: 120px; }
 .choice.sel { border-color: var(--teal); background: #dcf2f0; color: var(--teal); }
+
+/* announcements */
+.ann-card { margin-bottom: 10px; border-left: 6px solid var(--yellow); padding: 14px 16px; }
+.ann-card.pinned { border-left-color: var(--orange); background: #fffaf0; }
+.ann-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.ann-body { color: var(--ink); font-size: 14px; margin-top: 6px; white-space: pre-wrap; }
