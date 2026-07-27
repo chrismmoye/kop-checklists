@@ -679,7 +679,7 @@ on('PUT', '/api/checklists/:id', (req, res) => {
   }
   save();
   send(res, 200, checklistOut(c));
-}, { level: 'admin' });
+}, { level: 'manager' });
 on('DELETE', '/api/checklists/:id', (req, res) => {
   const c = data.checklists.find(x => x.id === Number(req.params.id));
   if (c) { c.active = 0; save(); }
@@ -1115,6 +1115,129 @@ on('GET', '/api/submissions/:id', (req, res) => {
       return { ...r, label: it.label, type: it.type, unit: it.unit, min: it.min, max: it.max, position: it.position };
     }).sort((a, b) => (a.position || 0) - (b.position || 0)),
   });
+}, { level: 'manager' });
+
+
+// ---------- reports ----------
+function submissionTerritory(s) {
+  const cart = s.location_id ? cartById(s.location_id) : null;
+  if (cart && cart.territory_id) return cart.territory_id;
+  const inst = s.instance_id ? data.instances.find(i => i.id === s.instance_id) : null;
+  return inst ? (inst.territory_id || null) : null;
+}
+function reportRange(req) {
+  const today = businessDate();
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from
+    : businessDate(new Date(Date.now() - 6 * 86400000));
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : today;
+  const clFilter = Number(req.query.checklist_id) || null;
+  const terrId = Number(req.query.territory_id) || null;
+  return { from, to, clFilter, terrId, terrFilter: terrId ? territoryCartIds(terrId) : null };
+}
+function eachDate(from, to, cb) {
+  let d = new Date(from + 'T12:00:00Z');
+  const end = new Date(to + 'T12:00:00Z');
+  let guard = 0;
+  while (d <= end && guard++ < 92) {
+    cb(d.toISOString().slice(0, 10));
+    d = new Date(d.getTime() + 86400000);
+  }
+}
+on('GET', '/api/reports', (req, res) => {
+  const { from, to, clFilter, terrId, terrFilter } = reportRange(req);
+  const byChecklist = new Map(); // id -> {name, emoji, expected, complete, missed, flags}
+  const bump = (c, field, n = 1) => {
+    if (!byChecklist.has(c.checklist_id)) byChecklist.set(c.checklist_id, { checklist_id: c.checklist_id, name: c.checklist_name, emoji: c.emoji, expected: 0, complete: 0, missed: 0, flags: 0 });
+    byChecklist.get(c.checklist_id)[field] += n;
+  };
+  eachDate(from, to, date => {
+    for (const r of dailyRows(date, terrFilter)) {
+      if (clFilter && r.checklist_id !== clFilter) continue;
+      bump(r, 'expected');
+      if (r.status === 'complete') bump(r, 'complete');
+      if (r.status === 'missed') bump(r, 'missed');
+      if (r.flags) bump(r, 'flags', r.flags);
+    }
+    let insts = data.instances.filter(x => x.date === date);
+    if (terrFilter) insts = insts.filter(x => (x.cart_id && terrFilter.has(x.cart_id)) || x.territory_id === terrId);
+    for (const i of insts.map(instanceOut)) {
+      if (clFilter && i.checklist_id !== clFilter) continue;
+      bump(i, 'expected');
+      if (i.status === 'complete') bump(i, 'complete');
+      else if (i.status === 'overdue' || date < businessDate()) bump(i, 'missed');
+      if (i.flags) bump(i, 'flags', i.flags);
+    }
+  });
+
+  // per-person + flagged answers from submissions in range
+  const subs = data.submissions.filter(s => s.date >= from && s.date <= to)
+    .filter(s => !clFilter || s.checklist_id === clFilter)
+    .filter(s => !terrId || submissionTerritory(s) === terrId);
+  const byUser = new Map();
+  const flagged = [];
+  for (const s of subs) {
+    const u = s.user_id ? userById(s.user_id) : null;
+    const key = u ? u.id : 0;
+    if (!byUser.has(key)) byUser.set(key, { user_id: key, name: u ? u.name : '—', complete: 0, flags: 0 });
+    const row = byUser.get(key);
+    row.complete++;
+    const fl = s.responses.filter(r => r.flagged);
+    row.flags += fl.length;
+    if (fl.length) {
+      const c = data.checklists.find(x => x.id === s.checklist_id);
+      flagged.push({
+        submission_id: s.id, date: s.date, checklist_name: c ? c.name : '?', emoji: c ? c.emoji : '',
+        user_name: u ? u.name : '—',
+        location_name: s.location_id ? ((cartById(s.location_id) || {}).name || null) : null,
+        items: fl.map(r => {
+          const it = c ? c.items.find(x => x.id === r.item_id) : null;
+          return { label: it ? it.label : '?', value: r.value, unit: it ? it.unit : null };
+        }),
+      });
+    }
+  }
+  const checklists = [...byChecklist.values()].map(c => ({ ...c, pct: c.expected ? Math.round(100 * c.complete / c.expected) : 0 }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const people = [...byUser.values()].sort((a, b) => b.complete - a.complete);
+  const totals = checklists.reduce((t, c) => ({ expected: t.expected + c.expected, complete: t.complete + c.complete, missed: t.missed + c.missed, flags: t.flags + c.flags }), { expected: 0, complete: 0, missed: 0, flags: 0 });
+  send(res, 200, {
+    from, to, checklists, people,
+    flagged: flagged.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 100),
+    totals: { ...totals, pct: totals.expected ? Math.round(100 * totals.complete / totals.expected) : 0 },
+    submission_count: subs.length,
+  });
+}, { level: 'manager' });
+
+on('GET', '/api/reports/export.csv', (req, res) => {
+  const { from, to, clFilter, terrId } = reportRange(req);
+  const subs = data.submissions.filter(s => s.date >= from && s.date <= to)
+    .filter(s => !clFilter || s.checklist_id === clFilter)
+    .filter(s => !terrId || submissionTerritory(s) === terrId)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const csvEsc = x => { const v = x == null ? '' : String(x); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const lines = ['date,checklist,type,question,answer,flagged,skipped,completed_by,location,territory,completed_at'];
+  for (const s of subs) {
+    const c = data.checklists.find(x => x.id === s.checklist_id);
+    if (!c) continue;
+    const u = s.user_id ? userById(s.user_id) : null;
+    const loc = s.location_id ? cartById(s.location_id) : null;
+    const tId = submissionTerritory(s);
+    const terr = tId ? terrById(tId) : null;
+    for (const r of s.responses) {
+      const it = c.items.find(x => x.id === r.item_id);
+      lines.push([
+        s.date, c.name, it ? it.type : '', it ? it.label : '',
+        r.photo ? '[photo]' : (r.value ?? ''), r.flagged ? 'YES' : '', r.skipped ? 'YES' : '',
+        u ? u.name : '', loc ? loc.name : '', terr ? terr.name : '', s.completed_at,
+      ].map(csvEsc).join(','));
+    }
+  }
+  const body = lines.join('\n');
+  res.writeHead(200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="kop-report-${from}-to-${to}.csv"`,
+  });
+  res.end(body);
 }, { level: 'manager' });
 
 // ---------- server ----------

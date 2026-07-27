@@ -4,9 +4,13 @@ A Jolt-style operations platform with King of Pops branding. Checklists auto-pop
 
 ## User levels
 
-- **👑 Admin** — full control. Can opt in as a notifier on any cart.
-- **🧭 Manager** — runs a territory: views dashboards/completed checklists (defaults to their territory, can see company-wide), adds/manages Slingers, and is automatically alerted when checklists in their territory go overdue. Can't edit checklists, carts, or Square settings.
-- **🍭 Slinger** — sees only their checklists to complete, plus chat.
+- **👑 Admin** — full control. Can opt in as a notifier on any location.
+- **🧭 Manager** — runs one or more territories: dashboards + Reports (company-wide view available), edits checklists (can't create/delete them), adds/manages Slingers, auto-alerted for overdue checklists in their territories. Can't touch locations/territories or Square settings.
+- **🍭 Slinger** — their checklists, schedule, clock in/out, and chat.
+
+## Reports
+
+📈 Reports (managers + admins): pick a date range, filter by checklist/territory — completion rates by checklist and by person, flagged answers with drill-down, and **Export CSV** (one row per answer) for feeding other systems. The same data is available programmatically at `GET /api/reports` (JSON) and `GET /api/reports/export.csv` — authenticate with an admin session cookie from `POST /api/login`.
 
 Everyone can use **⚡ Pick up a shift** (My checklists tab) when they work a shift that isn't in the schedule — it spawns their opening checklist immediately and the closing checklist 30 minutes before the end time they enter.
 

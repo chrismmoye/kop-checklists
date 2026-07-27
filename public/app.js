@@ -137,8 +137,8 @@ async function openNotifications() {
 
 // ---------- shell ----------
 function tabsFor() {
-  if (rank(ME) === 2) return ['dashboard|📊 Dashboard', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'carts|📍 Locations', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
-  if (rank(ME) === 1) return ['dashboard|📊 Dashboard', 'schedule|🗓️ Schedule', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
+  if (rank(ME) === 2) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'carts|📍 Locations', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
+  if (rank(ME) === 1) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
   return ['home|🍭 My checklists', 'myschedule|🗓️ My shifts', 'chat|💬 Chat'];
 }
 function shell() {
@@ -178,7 +178,7 @@ function shell() {
   document.querySelectorAll('.drawer-item[data-tab]').forEach(b => b.onclick = () => { TAB = b.dataset.tab; shell(); });
   refreshBell();
   const body = document.getElementById('body');
-  const views = { dashboard: renderDashboard, schedule: renderSchedule, checklists: renderChecklistAdmin, carts: renderCarts, users: renderUsers, chat: renderChat, mytasks: renderMyTasks, home: renderMyTasks, myschedule: renderMySchedule };
+  const views = { dashboard: renderDashboard, reports: renderReports, schedule: renderSchedule, checklists: renderChecklistAdmin, carts: renderCarts, users: renderUsers, chat: renderChat, mytasks: renderMyTasks, home: renderMyTasks, myschedule: renderMySchedule };
   views[TAB](body);
 }
 
@@ -712,6 +712,70 @@ async function openSubmission(id) {
     <div class="card">${rows}</div>`);
 }
 
+// ================= REPORTS =================
+let REP_FROM = null, REP_TO = null, REP_CL = '', REP_TERR = '';
+async function renderReports(body) {
+  if (!REP_TO) { REP_TO = new Date().toISOString().slice(0, 10); }
+  if (!REP_FROM) { REP_FROM = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10); }
+  const params = new URLSearchParams({ from: REP_FROM, to: REP_TO });
+  if (REP_CL) params.set('checklist_id', REP_CL);
+  if (REP_TERR) params.set('territory_id', REP_TERR);
+  const [rep, lists, terrs] = await Promise.all([
+    api('/api/reports?' + params), api('/api/checklists'), api('/api/territories')]);
+  const t = rep.totals;
+
+  const clRows = rep.checklists.map(c => `
+    <tr><td>${c.emoji} <b>${esc(c.name)}</b></td>
+      <td>${c.complete}/${c.expected}</td>
+      <td><span class="pill ${c.pct >= 90 ? 'green' : c.pct >= 60 ? 'yellow' : 'red'}">${c.pct}%</span></td>
+      <td>${c.missed}</td>
+      <td>${c.flags ? `<span class="pill red">⚑ ${c.flags}</span>` : '—'}</td></tr>`).join('');
+
+  const peopleRows = rep.people.map(p => `
+    <tr><td><b>${esc(p.name)}</b></td><td>${p.complete}</td>
+      <td>${p.flags ? `<span class="pill red">⚑ ${p.flags}</span>` : '—'}</td></tr>`).join('');
+
+  const flaggedRows = rep.flagged.map(f => `
+    <div class="mrow chat-row" data-sub="${f.submission_id}">
+      <div style="font-size:22px">⚑</div>
+      <div class="info"><b>${f.emoji} ${esc(f.checklist_name)} — ${esc(f.user_name)}</b>
+        <span>${prettyDate(f.date)}${f.location_name ? ' · ' + esc(f.location_name) : ''} ·
+        ${f.items.map(i => esc(i.label) + ': ' + esc(i.value ?? '—') + (i.unit ? ' ' + esc(i.unit) : '')).join(' · ')}</span></div>
+    </div>`).join('');
+
+  body.innerHTML = `
+    <div class="datebar">
+      <h2 style="margin-right:6px">📈 Reports</h2>
+      <input type="date" id="repFrom" value="${REP_FROM}"> <span style="font-weight:800;color:var(--ink-soft)">→</span>
+      <input type="date" id="repTo" value="${REP_TO}">
+      <select id="repCl" style="width:auto"><option value="">All checklists</option>
+        ${lists.map(c => `<option value="${c.id}" ${REP_CL == c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <select id="repTerr" style="width:auto"><option value="">All territories</option>
+        ${terrs.map(x => `<option value="${x.id}" ${REP_TERR == x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <div class="spacer"></div>
+      <a class="btn teal small" style="text-decoration:none" href="/api/reports/export.csv?${params}" download>⬇️ Export CSV</a>
+    </div>
+    <div class="stats">
+      <div class="card stat c-teal"><div class="num">${t.pct}%</div><div class="lbl">Completion</div></div>
+      <div class="card stat c-pink"><div class="num">${t.complete}/${t.expected}</div><div class="lbl">Done</div></div>
+      <div class="card stat c-red"><div class="num">${t.missed}</div><div class="lbl">Missed</div></div>
+      <div class="card stat c-orange"><div class="num">${t.flags}</div><div class="lbl">Flagged</div></div>
+    </div>
+    <div class="subhead">📋 By checklist</div>
+    ${clRows ? `<table class="grid"><tr><th>Checklist</th><th>Done</th><th>Rate</th><th>Missed</th><th>Flags</th></tr>${clRows}</table>` : '<div class="empty">No activity in this range.</div>'}
+    <div class="subhead">🧑‍🍳 By person</div>
+    ${peopleRows ? `<table class="grid"><tr><th>Person</th><th>Checklists completed</th><th>Flags</th></tr>${peopleRows}</table>` : '<div class="empty">No submissions in this range.</div>'}
+    <div class="subhead">⚑ Flagged answers (tap for full checklist)</div>
+    ${flaggedRows || '<div class="empty">Nothing flagged — clean range 🎉</div>'}
+  `;
+  const rerun = () => renderReports(body);
+  body.querySelector('#repFrom').onchange = e => { REP_FROM = e.target.value; rerun(); };
+  body.querySelector('#repTo').onchange = e => { REP_TO = e.target.value; rerun(); };
+  body.querySelector('#repCl').onchange = e => { REP_CL = e.target.value; rerun(); };
+  body.querySelector('#repTerr').onchange = e => { REP_TERR = e.target.value; rerun(); };
+  body.querySelectorAll('[data-sub]').forEach(r => r.onclick = () => openSubmission(r.dataset.sub));
+}
+
 // ================= SCHEDULE =================
 async function renderSchedule(body) {
   const q = SCHED_DATE ? '?date=' + SCHED_DATE : '';
@@ -891,9 +955,10 @@ async function renderSchedule(body) {
 async function renderChecklistAdmin(body) {
   const [lists, carts, cats] = await Promise.all([api('/api/checklists'), api('/api/locations'), api('/api/categories')]);
   const trigLabel = { opening: '☀️ Opening (start of shift)', closing: '🌙 Closing (30 min before end)', daily: '📅 Daily schedule' };
+  const isAdminCl = rank(ME) === 2;
   body.innerHTML = `
     <div class="section-head"><h2>Checklists</h2><div class="spacer"></div>
-      <button class="btn" id="newCl">+ New checklist</button></div>
+      ${isAdminCl ? '<button class="btn" id="newCl">+ New checklist</button>' : '<span class="pill teal">Managers can edit — admins add/delete</span>'}</div>
     ${lists.map(c => `
       <div class="mrow">
         <div style="font-size:26px">${c.emoji}</div>
@@ -902,10 +967,11 @@ async function renderChecklistAdmin(body) {
           ${c.location_id ? esc(c.location_name) : c.category_id ? esc(c.category_name) + ' (category)' : 'All locations'} ·
           ${c.job_role ? esc(c.job_role) : 'All roles'}${c.trigger === 'daily' ? ' · ' + (c.days.split(',').length === 7 ? 'Daily' : c.days.split(',').map(d => DAY_NAMES[d]).join(', ')) + (c.due_time ? ' · due ' + c.due_time : '') : ''} · ${c.items.length} items</span></div>
         <button class="btn ghost small" data-edit="${c.id}">Edit</button>
-        <button class="btn danger small" data-del="${c.id}">Delete</button>
+        ${isAdminCl ? `<button class="btn danger small" data-del="${c.id}">Delete</button>` : ''}
       </div>`).join('') || '<div class="empty"><div class="big">📋</div>No checklists yet — create your first!</div>'}
   `;
-  body.querySelector('#newCl').onclick = () => checklistBuilder(null, carts, cats, () => renderChecklistAdmin(body));
+  const newClBtn = body.querySelector('#newCl');
+  if (newClBtn) newClBtn.onclick = () => checklistBuilder(null, carts, cats, () => renderChecklistAdmin(body));
   body.querySelectorAll('[data-edit]').forEach(b => b.onclick = () =>
     checklistBuilder(lists.find(c => c.id == b.dataset.edit), carts, cats, () => renderChecklistAdmin(body)));
   body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
