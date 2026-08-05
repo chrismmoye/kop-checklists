@@ -137,9 +137,9 @@ async function openNotifications() {
 
 // ---------- shell ----------
 function tabsFor() {
-  if (rank(ME) === 2) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'carts|📍 Locations', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
-  if (rank(ME) === 1) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'users|👥 Team', 'chat|💬 Chat', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
-  return ['home|🍭 My checklists', 'myschedule|🗓️ My shifts', 'chat|💬 Chat'];
+  if (rank(ME) === 2) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'carts|📍 Locations', 'users|👥 Team', 'chat|💬 Chat', 'opps|✨ Opportunities', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
+  if (rank(ME) === 1) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'users|👥 Team', 'chat|💬 Chat', 'opps|✨ Opportunities', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
+  return ['home|🍭 My checklists', 'myschedule|🗓️ My shifts', 'chat|💬 Chat', 'opps|✨ Opportunities'];
 }
 function shell() {
   clearInterval(CHAT_TIMER);
@@ -162,6 +162,7 @@ function shell() {
       </div>
       ${tabs.map(t => { const [k, l] = t.split('|'); return `<button class="drawer-item ${TAB === k ? 'active' : ''}" data-tab="${k}">${l}</button>`; }).join('')}
       <div class="drawer-foot">
+        <button class="drawer-item" id="pwBtn">🔑 Change my password</button>
         <button class="drawer-item" id="logoutBtn">🚪 Sign out</button>
       </div>
     </nav>
@@ -174,11 +175,27 @@ function shell() {
   const closeDrawer = () => { drawerBg.classList.remove('open'); setTimeout(() => drawerBg.hidden = true, 200); };
   drawerBg.onclick = e => { if (e.target === drawerBg) closeDrawer(); };
   document.getElementById('logoutBtn').onclick = async () => { await api('/api/logout', { method: 'POST' }); ME = null; renderLogin(); };
+  document.getElementById('pwBtn').onclick = () => {
+    const bg = modal(`
+      <h2>🔑 Change my password</h2>
+      <label>Current password</label><input type="password" id="pwCur" autocomplete="current-password">
+      <label>New password</label><input type="password" id="pwNew" placeholder="6+ characters" autocomplete="new-password">
+      <label>Confirm new password</label><input type="password" id="pwNew2" autocomplete="new-password">
+      <button class="btn teal" id="pwGo" style="width:100%;margin-top:16px">Update password</button>`);
+    bg.querySelector('#pwGo').onclick = async () => {
+      const cur = bg.querySelector('#pwCur').value, n1 = bg.querySelector('#pwNew').value, n2 = bg.querySelector('#pwNew2').value;
+      if (n1 !== n2) return toast("New passwords don't match", true);
+      try {
+        await api('/api/me/password', { method: 'POST', json: { current: cur, next: n1 } });
+        bg.remove(); toast('Password updated 🔑');
+      } catch (e) { toast(e.message, true); }
+    };
+  };
   document.getElementById('bellBtn').onclick = openNotifications;
   document.querySelectorAll('.drawer-item[data-tab]').forEach(b => b.onclick = () => { TAB = b.dataset.tab; shell(); });
   refreshBell();
   const body = document.getElementById('body');
-  const views = { dashboard: renderDashboard, reports: renderReports, schedule: renderSchedule, checklists: renderChecklistAdmin, carts: renderCarts, users: renderUsers, chat: renderChat, mytasks: renderMyTasks, home: renderMyTasks, myschedule: renderMySchedule };
+  const views = { dashboard: renderDashboard, reports: renderReports, schedule: renderSchedule, checklists: renderChecklistAdmin, carts: renderCarts, users: renderUsers, chat: renderChat, opps: renderOpportunities, mytasks: renderMyTasks, home: renderMyTasks, myschedule: renderMySchedule };
   views[TAB](body);
 }
 
@@ -192,14 +209,30 @@ function renderLogin() {
     <div class="sub">Operations Checklists</div>
     <form id="loginForm">
       <label>Email</label><input name="email" type="email" required autocomplete="username" placeholder="you@kingofpops.com">
-      <label>Password</label><input name="password" type="password" required autocomplete="current-password" placeholder="••••••••">
-      <button class="btn">Let's go 🌈</button>
+      <div id="pwWrap"><label>Password</label><input name="password" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+      <button class="btn" id="loginBtn">Let's go 🌈</button>
+      <button type="button" class="btn ghost" id="modeBtn" style="width:100%;margin-top:10px">✉️ Email me a sign-in link instead</button>
     </form>
   </div></div>`;
+  let linkMode = false;
+  const pwWrap = document.getElementById('pwWrap');
+  const modeBtn = document.getElementById('modeBtn');
+  const loginBtn = document.getElementById('loginBtn');
+  modeBtn.onclick = () => {
+    linkMode = !linkMode;
+    pwWrap.style.display = linkMode ? 'none' : '';
+    loginBtn.textContent = linkMode ? '✉️ Send me a sign-in link' : "Let's go 🌈";
+    modeBtn.textContent = linkMode ? '🔑 Use my password instead' : '✉️ Email me a sign-in link instead';
+  };
   document.getElementById('loginForm').onsubmit = async e => {
     e.preventDefault();
     const f = new FormData(e.target);
     try {
+      if (linkMode) {
+        const r = await api('/api/login/link', { method: 'POST', json: { email: f.get('email') } });
+        toast(r.note || 'Check your email 📬');
+        return;
+      }
       const { user } = await api('/api/login', { method: 'POST', json: { email: f.get('email'), password: f.get('password') } });
       ME = user; TAB = null;
       shell();
@@ -712,6 +745,169 @@ async function openSubmission(id) {
     <div class="card">${rows}</div>`);
 }
 
+// ================= OPPORTUNITIES =================
+let OPP_KIND = 'event';
+const KIND_META = {
+  event: ['🎪', 'Events & Festivals', 'Big shifts up for grabs — festivals, races, markets.'],
+  flagship: ['⭐', 'Flagship Spots', 'Our recurring, high-volume locations.'],
+  role: ['💼', 'Open Roles', 'Positions we\'re hiring for right now.'],
+};
+async function renderOpportunities(body) {
+  const d = await api('/api/opportunities');
+  const isLeader = rank(ME) >= 1;
+  const posts = d.postings.filter(p => p.kind === OPP_KIND);
+
+  const cards = posts.map(p => {
+    let action;
+    if (p.my_application === 'pending') action = '<span class="pill yellow">Applied ✋</span>';
+    else if (p.my_application === 'accepted') action = '<span class="pill green">Accepted 🎉</span>';
+    else if (p.my_application === 'declined') action = '<span class="pill gray">Not this time</span>';
+    else if (p.status === 'open') action = `<button class="btn teal small" data-apply="${p.id}">Apply 🙋</button>`;
+    else action = '<span class="pill gray">Closed</span>';
+    return `<div class="card ann-card" style="border-left-color:var(--teal)">
+      <div class="ann-head"><b>${KIND_META[p.kind][0]} ${esc(p.title)}${p.status === 'closed' ? ' <span class="pill gray">closed</span>' : ''}</b>
+        <span style="color:var(--ink-soft);font-size:12px;font-weight:700">${p.when_text ? esc(p.when_text) : ago(p.created_at)}</span></div>
+      ${p.where_text ? `<div style="font-size:13px;color:var(--ink-soft);font-weight:700">📍 ${esc(p.where_text)}</div>` : ''}
+      ${p.description ? `<div class="ann-body">${esc(p.description)}</div>` : ''}
+      ${p.requirements ? `<div class="ann-body" style="font-size:13px"><b>Requirements:</b> ${esc(p.requirements)}</div>` : ''}
+      <div class="row" style="margin-top:10px;align-items:center">
+        ${action}
+        <button class="btn ghost small" data-refer="${p.id}">🤝 Refer a friend</button>
+        ${isLeader ? `<div class="spacer"></div>
+          ${p.applicant_count ? `<span class="pill teal">${p.applicant_count} pending</span>` : ''}
+          <button class="btn ghost mini" data-editopp="${p.id}">Edit</button>
+          <button class="btn ghost mini" data-toggleopp="${p.id}" data-status="${p.status}">${p.status === 'open' ? 'Close' : 'Reopen'}</button>
+          <button class="btn danger mini" data-delopp="${p.id}">✕</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
+  const inbox = isLeader ? `
+    <div class="subhead">📥 Applications (${(d.applications || []).length})</div>
+    ${(d.applications || []).map(ap => `
+      <div class="mrow"><div style="font-size:22px">🙋</div>
+        <div class="info"><b>${esc(ap.user_name)} → ${esc(ap.posting_title)}</b>
+          <span>${ap.note ? esc(ap.note) + ' · ' : ''}${ago(ap.created_at)}</span></div>
+        <button class="btn teal small" data-acc="${ap.id}">Accept</button>
+        <button class="btn ghost small" data-dec="${ap.id}">Decline</button>
+      </div>`).join('') || '<div class="empty" style="padding:12px">No applications waiting.</div>'}
+    <div class="subhead">🤝 Referrals (${(d.referrals || []).length})</div>
+    ${(d.referrals || []).map(r => `
+      <div class="mrow"><div style="font-size:22px">🤝</div>
+        <div class="info"><b>${esc(r.friend_name)}${r.friend_contact ? ' · ' + esc(r.friend_contact) : ''}</b>
+          <span>from ${esc(r.user_name)}${r.posting_title ? ' for ' + esc(r.posting_title) : ''}${r.note ? ' · ' + esc(r.note) : ''} · ${ago(r.created_at)}</span></div>
+        <button class="btn ghost small" data-refdone="${r.id}">Mark contacted</button>
+      </div>`).join('') || '<div class="empty" style="padding:12px">No referrals waiting.</div>'}
+    <div class="subhead">💡 Spot suggestions (${(d.suggestions || []).length})</div>
+    ${(d.suggestions || []).map(s => `
+      <div class="mrow"><div style="font-size:22px">💡</div>
+        <div class="info"><b>${esc(s.title)}</b>
+          <span>from ${esc(s.user_name)}${s.details ? ' · ' + esc(s.details) : ''} · ${ago(s.created_at)}</span></div>
+        <button class="btn ghost small" data-sugdone="${s.id}">Mark reviewed</button>
+      </div>`).join('') || '<div class="empty" style="padding:12px">No suggestions waiting.</div>'}` : '';
+
+  body.innerHTML = `
+    <div class="section-head"><h2>✨ Opportunities</h2><div class="spacer"></div>
+      <button class="btn ghost small" id="suggestBtn">💡 Suggest a spot</button>
+      ${isLeader ? '<button class="btn" id="newOpp">+ Post</button>' : ''}</div>
+    <div class="chat-chips" style="margin-bottom:14px">
+      ${Object.entries(KIND_META).map(([k, m]) => `<button class="chip ${OPP_KIND === k ? 'active' : ''}" data-kind="${k}">${m[0]} ${m[1]}</button>`).join('')}
+    </div>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 10px">${KIND_META[OPP_KIND][2]}</p>
+    ${cards || '<div class="empty"><div class="big">✨</div>Nothing posted here yet — check back soon!</div>'}
+    ${inbox}
+  `;
+  const refresh = () => renderOpportunities(body);
+  body.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => { OPP_KIND = b.dataset.kind; refresh(); });
+  body.querySelector('#suggestBtn').onclick = () => {
+    const bg = modal(`<h2>💡 Suggest a spot</h2>
+      <p style="color:var(--ink-soft);font-size:14px">Know a park, market, or event where we'd crush it? Tell us!</p>
+      <label>Where?</label><input id="sgTitle" placeholder="e.g. Grant Park Farmers Market">
+      <label>Why it'd work (optional)</label><textarea id="sgDetails" rows="3" placeholder="Foot traffic, timing, contacts…"></textarea>
+      <button class="btn teal" id="sgGo" style="width:100%;margin-top:14px">Send suggestion</button>`);
+    bg.querySelector('#sgGo').onclick = async () => {
+      try {
+        await api('/api/suggestions', { method: 'POST', json: { title: bg.querySelector('#sgTitle').value, details: bg.querySelector('#sgDetails').value } });
+        bg.remove(); toast('Thanks — leadership got your suggestion 💡'); refresh();
+      } catch (e) { toast(e.message, true); }
+    };
+  };
+  body.querySelectorAll('[data-apply]').forEach(b => b.onclick = () => {
+    const bg = modal(`<h2>🙋 Apply</h2>
+      <label>Anything to add? (optional)</label><textarea id="apNote" rows="3" placeholder="Availability, experience, why you're a fit…"></textarea>
+      <button class="btn teal" id="apGo" style="width:100%;margin-top:14px">Submit application</button>`);
+    bg.querySelector('#apGo').onclick = async () => {
+      try {
+        await api(`/api/opportunities/${b.dataset.apply}/apply`, { method: 'POST', json: { note: bg.querySelector('#apNote').value } });
+        bg.remove(); toast('Applied — leadership was notified 🙋'); refresh();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+  body.querySelectorAll('[data-refer]').forEach(b => b.onclick = () => {
+    const bg = modal(`<h2>🤝 Refer a friend</h2>
+      <label>Their name</label><input id="rfName">
+      <label>How do we reach them?</label><input id="rfContact" placeholder="Phone or email">
+      <label>Note (optional)</label><textarea id="rfNote" rows="2" placeholder="Why they'd be great…"></textarea>
+      <button class="btn teal" id="rfGo" style="width:100%;margin-top:14px">Send referral</button>`);
+    bg.querySelector('#rfGo').onclick = async () => {
+      try {
+        await api('/api/referrals', { method: 'POST', json: {
+          posting_id: Number(b.dataset.refer), friend_name: bg.querySelector('#rfName').value,
+          friend_contact: bg.querySelector('#rfContact').value, note: bg.querySelector('#rfNote').value } });
+        bg.remove(); toast('Referral sent 🤝'); refresh();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+  const oppForm = (p) => {
+    const bg = modal(`<h2>${p ? 'Edit' : 'New'} opportunity</h2>
+      <label>Type</label><select id="opKind">
+        ${Object.entries(KIND_META).map(([k, m]) => `<option value="${k}" ${(p ? p.kind : OPP_KIND) === k ? 'selected' : ''}>${m[0]} ${m[1]}</option>`).join('')}</select>
+      <label>Title</label><input id="opTitle" value="${esc(p?.title || '')}" placeholder="e.g. Music Midtown — 3 day festival">
+      <label>When</label><input id="opWhen" value="${esc(p?.when_text || '')}" placeholder="e.g. Sept 12–14, 11am–9pm">
+      <label>Where</label><input id="opWhere" value="${esc(p?.where_text || '')}" placeholder="e.g. Piedmont Park">
+      <label>Details</label><textarea id="opDesc" rows="3">${esc(p?.description || '')}</textarea>
+      <label>Requirements</label><textarea id="opReq" rows="2" placeholder="e.g. Must be able to lift 50 lbs, 6 months experience">${esc(p?.requirements || '')}</textarea>
+      <button class="btn teal" id="opGo" style="width:100%;margin-top:14px">${p ? 'Save' : 'Post'} opportunity</button>`);
+    bg.querySelector('#opGo').onclick = async () => {
+      const payload = {
+        kind: bg.querySelector('#opKind').value, title: bg.querySelector('#opTitle').value,
+        when_text: bg.querySelector('#opWhen').value, where_text: bg.querySelector('#opWhere').value,
+        description: bg.querySelector('#opDesc').value, requirements: bg.querySelector('#opReq').value,
+      };
+      try {
+        await api(p ? '/api/opportunities/' + p.id : '/api/opportunities', { method: p ? 'PUT' : 'POST', json: payload });
+        bg.remove(); toast('Saved ✨'); OPP_KIND = payload.kind; refresh();
+      } catch (e) { toast(e.message, true); }
+    };
+  };
+  const newOppBtn = body.querySelector('#newOpp');
+  if (newOppBtn) newOppBtn.onclick = () => oppForm(null);
+  body.querySelectorAll('[data-editopp]').forEach(b => b.onclick = () => oppForm(d.postings.find(p => p.id == b.dataset.editopp)));
+  body.querySelectorAll('[data-toggleopp]').forEach(b => b.onclick = async () => {
+    await api('/api/opportunities/' + b.dataset.toggleopp, { method: 'PUT', json: { status: b.dataset.status === 'open' ? 'closed' : 'open' } });
+    refresh();
+  });
+  body.querySelectorAll('[data-delopp]').forEach(b => b.onclick = async () => {
+    if (!confirm('Delete this posting?')) return;
+    await api('/api/opportunities/' + b.dataset.delopp, { method: 'DELETE' });
+    refresh();
+  });
+  body.querySelectorAll('[data-acc]').forEach(b => b.onclick = async () => {
+    await api('/api/applications/' + b.dataset.acc + '/decide', { method: 'POST', json: { accept: true } });
+    toast('Accepted — they were notified 🎉'); refresh();
+  });
+  body.querySelectorAll('[data-dec]').forEach(b => b.onclick = async () => {
+    await api('/api/applications/' + b.dataset.dec + '/decide', { method: 'POST', json: { accept: false } });
+    toast('Declined'); refresh();
+  });
+  body.querySelectorAll('[data-refdone]').forEach(b => b.onclick = async () => {
+    await api('/api/referrals/' + b.dataset.refdone + '/handled', { method: 'POST' }); refresh();
+  });
+  body.querySelectorAll('[data-sugdone]').forEach(b => b.onclick = async () => {
+    await api('/api/suggestions/' + b.dataset.sugdone + '/handled', { method: 'POST' }); refresh();
+  });
+}
+
 // ================= REPORTS =================
 let REP_FROM = null, REP_TO = null, REP_CL = '', REP_TERR = '';
 async function renderReports(body) {
@@ -822,6 +1018,7 @@ async function renderSchedule(body) {
         ${isAdmin ? `<div style="flex:0 0 auto"><button class="btn small" id="importTeam">👥 Import team from Square</button></div>` : ''}
       </div>
       ${isAdmin ? `<div class="row" style="margin-top:8px">
+        <div style="flex:0 0 auto"><button class="btn ghost small" id="emailCfg">✉️ Email sign-in setup</button></div>
         <div style="flex:0 0 auto"><button class="btn ghost small" id="pickLoc">🏦 Payroll location: ${sq.location_id ? 'set ✓' : '<span style="color:var(--red)">not set (needed for clock-in)</span>'}</button></div>
         <div style="flex:0 0 auto"><a class="btn ghost small" href="/api/backup" download style="text-decoration:none;display:inline-block">⬇️ Download backup</a></div>
         <div style="flex:0 0 auto"><button class="btn ghost small" id="restoreBtn">⬆️ Restore backup</button>
@@ -857,6 +1054,22 @@ async function renderSchedule(body) {
     toast('Declined'); renderSchedule(body);
   });
   if (isAdmin) {
+    body.querySelector('#emailCfg').onclick = async () => {
+      const cfg = await api('/api/emailcfg');
+      const bg = modal(`<h2>✉️ Email sign-in setup</h2>
+        <p style="color:var(--ink-soft);font-size:14px">Lets the team sign in with a link instead of a password. Create a free account at <b>resend.com</b>, verify your kingofpops.com domain, then paste an API key here.</p>
+        <div style="font-size:14px;margin-bottom:6px">Status: ${cfg.configured ? `<span class="status-ok">Configured (${esc(cfg.key_preview)})</span>` : '<span class="status-bad">Not set up</span>'}</div>
+        <label>Resend API key</label><input id="emKey" type="password" placeholder="re_...">
+        <label>From address</label><input id="emFrom" value="${esc(cfg.from || 'King of Pops <ops@kingofpops.com>')}">
+        <button class="btn teal" id="emGo" style="width:100%;margin-top:14px">Save email settings</button>`);
+      bg.querySelector('#emGo').onclick = async () => {
+        const payload = { from: bg.querySelector('#emFrom').value };
+        const k = bg.querySelector('#emKey').value.trim();
+        if (k) payload.resend_key = k;
+        await api('/api/emailcfg', { method: 'PUT', json: payload });
+        bg.remove(); toast('Email settings saved ✉️');
+      };
+    };
     body.querySelector('#pickLoc').onclick = async () => {
       try {
         const locs = await api('/api/square/locations');
@@ -1353,7 +1566,7 @@ async function renderChatList(body) {
     <div class="mrow chat-row" data-ch="${c.id}">
       <div style="font-size:24px">${c.type === 'dm' ? '👤' : c.type === 'territory' ? '🗺️' : '📣'}</div>
       <div class="info">
-        <b>${c.type === 'dm' ? esc(c.name) : '#' + esc(c.name)}</b>
+        <b>${c.type === 'dm' ? esc(c.name) : '#' + esc(c.name)}${c.min_level === 'manager' ? ' 🔒' : ''}</b>
         <span>${c.last_preview ? `${c.last_from ? esc(c.last_from) + ': ' : ''}${esc(c.last_preview)}` : 'No messages yet'}</span>
       </div>
       <div style="text-align:right;flex-shrink:0">
@@ -1363,12 +1576,26 @@ async function renderChatList(body) {
     </div>`).join('');
   body.innerHTML = `
     <div class="section-head"><h2>💬 Chat</h2><div class="spacer"></div>
+      ${rank(ME) === 2 ? '<button class="btn ghost small" id="newCh">+ Channel</button>' : ''}
       <button class="btn" id="newDm">+ New message</button></div>
     ${rows || '<div class="empty"><div class="big">💬</div>No conversations yet.</div>'}`;
   body.querySelectorAll('[data-ch]').forEach(row => row.onclick = () => {
     CHAT_CHANNEL = Number(row.dataset.ch); CHAT_LAST_ID = 0;
     renderChat(body);
   });
+  const newChBtn = body.querySelector('#newCh');
+  if (newChBtn) newChBtn.onclick = () => {
+    const bg = modal(`<h2># New channel</h2>
+      <label>Channel name</label><input id="chName" placeholder="e.g. Wholesale Ops">
+      <label class="checkline" style="margin-top:10px"><input type="checkbox" id="chLead"> 🔒 Leadership only (managers + admins)</label>
+      <button class="btn teal" id="chGo" style="width:100%;margin-top:14px">Create channel</button>`);
+    bg.querySelector('#chGo').onclick = async () => {
+      try {
+        await api('/api/chat/channels', { method: 'POST', json: { name: bg.querySelector('#chName').value, min_level: bg.querySelector('#chLead').checked ? 'manager' : 'slinger' } });
+        bg.remove(); toast('Channel created'); renderChatList(body);
+      } catch (e) { toast(e.message, true); }
+    };
+  };
   body.querySelector('#newDm').onclick = async () => {
     const list = await api('/api/chat/people');
     const bg = modal(`<h2>New direct message</h2>
@@ -1472,6 +1699,19 @@ async function renderConversation(body) {
 // ---------- boot ----------
 (async () => {
   registerSW();
+  const params = new URLSearchParams(location.search);
+  const linkToken = params.get('link');
+  if (linkToken) {
+    try {
+      const { user } = await api('/api/login/verify', { method: 'POST', json: { token: linkToken } });
+      ME = user;
+      history.replaceState({}, '', '/');
+      shell();
+      toast('Signed in 🍭');
+      setInterval(refreshBell, 60000);
+      return;
+    } catch (e) { history.replaceState({}, '', '/'); setTimeout(() => toast(e.message, true), 400); }
+  }
   try {
     const { user } = await api('/api/me');
     ME = user;

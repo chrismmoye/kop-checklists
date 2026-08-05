@@ -20,7 +20,16 @@ Create territories in the Carts tab and assign each cart to one. Assign a Manage
 
 ## Chat
 
-💬 Chat tab for all levels: **#general** for everyone, a channel per territory, and private DMs (+ DM button). Attach photos or files with 📎. DMs trigger an alert + push notification for the recipient.
+💬 Chat for all levels: **#general**, **#Bar**, **#Retail Ops**, **#Catering Ops**, **#Outpost Ops**, and **#Leadership** (managers + admins only 🔒), plus private DMs. Admins can add/rename/delete channels. Attach photos or files with 📎. DMs trigger an alert + push notification.
+
+## Signing in
+
+- **Password**: everyone can change their own via ☰ menu → 🔑 Change my password.
+- **Email link (passwordless)**: on the login screen, "Email me a sign-in link" sends a one-time link valid 15 minutes. Set this up once: Schedule → **✉️ Email sign-in setup** → paste a [Resend](https://resend.com) API key (free tier is plenty) and a verified From address.
+
+## Opportunities
+
+✨ Opportunities (everyone): three boards — 🎪 Events & Festivals, ⭐ Flagship Spots, 💼 Open Roles — each posting showing when/where/requirements with an **Apply** button. Team members can also **🤝 Refer a friend** and **💡 Suggest a spot**. Managers and admins post opportunities and get an inbox of applications, referrals, and suggestions; accepting or declining notifies the applicant automatically.
 
 **Zero dependencies** — pure Node.js. No `npm install`, no database server.
 

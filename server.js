@@ -153,6 +153,63 @@ on('POST', '/api/me/password', (req, res) => {
   send(res, 200, { ok: true });
 }, { auth: true });
 
+// ---------- email sign-in links ----------
+async function sendEmail(to, subject, html) {
+  const cfg = data.settings.email || {};
+  if (!cfg.resend_key || !cfg.from) return { error: 'Email sending is not configured yet' };
+  try {
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cfg.resend_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: cfg.from, to: [to], subject, html }),
+    });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); return { error: j.message || 'Email send failed (HTTP ' + r.status + ')' }; }
+    return { ok: true };
+  } catch (e) { return { error: e.message }; }
+}
+on('POST', '/api/login/link', async (req, res) => {
+  const email = String((req.body || {}).email || '').trim().toLowerCase();
+  const u = data.users.find(x => x.active && x.email.toLowerCase() === email);
+  const generic = { ok: true, note: 'If that email has an account, a sign-in link is on its way.' };
+  if (!u) return send(res, 200, generic);
+  const token = crypto.randomBytes(32).toString('base64url');
+  data.login_tokens = (data.login_tokens || []).filter(t => t.exp > Date.now());
+  data.login_tokens.push({ token_hash: crypto.createHash('sha256').update(token).digest('hex'), user_id: u.id, exp: Date.now() + 15 * 60000 });
+  save();
+  const origin = (req.headers['x-forwarded-proto'] ? req.headers['x-forwarded-proto'] + '://' : 'https://') + (req.headers['x-forwarded-host'] || req.headers.host);
+  const link = `${origin}/?link=${token}`;
+  const r = await sendEmail(u.email, '🍭 Your King of Pops sign-in link',
+    `<p>Hey ${u.name.split(' ')[0]}! Tap to sign in — the link works for 15 minutes:</p>
+     <p><a href="${link}" style="background:#F37C20;color:#fff;padding:12px 22px;border-radius:999px;text-decoration:none;font-weight:bold">Sign in to KOP Checklists</a></p>
+     <p style="color:#888;font-size:13px">If the button doesn't work: ${link}</p>`);
+  if (r.error) return send(res, 400, { error: r.error });
+  send(res, 200, generic);
+});
+on('POST', '/api/login/verify', (req, res) => {
+  const token = String((req.body || {}).token || '');
+  const hash = crypto.createHash('sha256').update(token).digest('hex');
+  data.login_tokens = (data.login_tokens || []).filter(t => t.exp > Date.now());
+  const t = data.login_tokens.find(x => x.token_hash === hash);
+  if (!t) return send(res, 401, { error: 'That sign-in link is invalid or expired — request a new one.' });
+  data.login_tokens = data.login_tokens.filter(x => x !== t); save();
+  const u = userById(t.user_id);
+  if (!u || !u.active) return send(res, 401, { error: 'Account not found' });
+  res.setHeader('Set-Cookie', `kop_session=${signSession(u.id)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}`);
+  send(res, 200, { user: publicUser(u) });
+});
+on('GET', '/api/emailcfg', (req, res) => {
+  const cfg = data.settings.email || {};
+  send(res, 200, { configured: !!(cfg.resend_key && cfg.from), from: cfg.from || null, key_preview: cfg.resend_key ? '••••' + cfg.resend_key.slice(-4) : null });
+}, { level: 'admin' });
+on('PUT', '/api/emailcfg', (req, res) => {
+  const b = req.body || {};
+  data.settings.email = data.settings.email || {};
+  if (b.resend_key !== undefined) data.settings.email.resend_key = String(b.resend_key || '').trim() || null;
+  if (b.from !== undefined) data.settings.email.from = String(b.from || '').trim() || null;
+  save();
+  send(res, 200, { ok: true });
+}, { level: 'admin' });
+
 // ---------- worker: today ----------
 on('GET', '/api/today', (req, res) => {
   engine.generateInstances();
@@ -460,7 +517,6 @@ on('POST', '/api/territories', (req, res) => {
   if (!name) return send(res, 400, { error: 'Name required' });
   const t = { id: nextId('territory'), name };
   data.territories.push(t);
-  data.channels.push({ id: nextId('channel'), name, type: 'territory', territory_id: t.id, member_ids: null });
   save();
   send(res, 200, t);
 }, { level: 'admin' });
@@ -475,8 +531,6 @@ on('PUT', '/api/territories/:id', (req, res) => {
     t.square_location_name = b.square_location_name || null;
   }
   t.name = String(b.name || t.name).trim();
-  const ch = data.channels.find(c => c.type === 'territory' && c.territory_id === t.id);
-  if (ch) ch.name = t.name;
   save();
   send(res, 200, { ok: true });
 }, { level: 'admin' });
@@ -484,8 +538,6 @@ on('DELETE', '/api/territories/:id', (req, res) => {
   const id = Number(req.params.id);
   data.locations.forEach(l => { if (l.territory_id === id) l.territory_id = null; });
   data.users.forEach(u => { if (u.territory_ids) u.territory_ids = u.territory_ids.filter(x => x !== id); });
-  const ch = data.channels.find(c => c.type === 'territory' && c.territory_id === id);
-  if (ch) { data.messages = data.messages.filter(m => m.channel_id !== ch.id); data.channels = data.channels.filter(c => c.id !== ch.id); }
   data.territories = data.territories.filter(t => t.id !== id);
   save();
   send(res, 200, { ok: true });
@@ -904,7 +956,10 @@ function setRead(userId, channelId, msgId) {
   if (msgId > r.last_read_id) { r.last_read_id = msgId; save(); }
 }
 function visibleChannels(u) {
-  return data.channels.filter(c => c.type !== 'dm' || (c.member_ids || []).includes(u.id));
+  return data.channels.filter(c => {
+    if (c.type === 'dm') return (c.member_ids || []).includes(u.id);
+    return rank(u) >= (RANK[c.min_level || 'slinger'] || 0);
+  });
 }
 function channelOut(c, u) {
   const last = [...data.messages].reverse().find(m => m.channel_id === c.id);
@@ -914,7 +969,7 @@ function channelOut(c, u) {
     name = otherId ? (userById(otherId) || {}).name || 'Direct message' : 'Direct message';
   }
   return {
-    id: c.id, name, type: c.type,
+    id: c.id, name, type: c.type, min_level: c.min_level || 'slinger',
     unread: data.messages.filter(m => m.channel_id === c.id && m.id > lastReadId(u.id, c.id) && m.user_id !== u.id).length,
     last_at: last ? last.created_at : null,
     last_preview: last ? (last.text ? last.text.slice(0, 70) : '📎 ' + (last.file_name || 'File')) : null,
@@ -932,6 +987,33 @@ on('GET', '/api/chat/channels', (req, res) => {
   chans.sort((a, b) => (a.type === 'general' ? -1 : b.type === 'general' ? 1 : String(b.last_at || '').localeCompare(String(a.last_at || ''))));
   send(res, 200, chans);
 }, { auth: true });
+on('POST', '/api/chat/channels', (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim().slice(0, 40);
+  if (!name) return send(res, 400, { error: 'Name required' });
+  if (data.channels.some(c => c.type !== 'dm' && c.name.toLowerCase() === name.toLowerCase()))
+    return send(res, 400, { error: 'That channel already exists' });
+  const ch = { id: nextId('channel'), name, type: 'channel', territory_id: null, member_ids: null, min_level: b.min_level === 'manager' ? 'manager' : 'slinger' };
+  data.channels.push(ch); save();
+  send(res, 200, channelOut(ch, req.user));
+}, { level: 'admin' });
+on('PUT', '/api/chat/channels/:id', (req, res) => {
+  const ch = data.channels.find(c => c.id === Number(req.params.id) && c.type === 'channel');
+  if (!ch) return send(res, 404, { error: 'Channel not found' });
+  const b = req.body || {};
+  if (b.name) ch.name = String(b.name).trim().slice(0, 40);
+  if (b.min_level) ch.min_level = b.min_level === 'manager' ? 'manager' : 'slinger';
+  save();
+  send(res, 200, { ok: true });
+}, { level: 'admin' });
+on('DELETE', '/api/chat/channels/:id', (req, res) => {
+  const ch = data.channels.find(c => c.id === Number(req.params.id) && c.type === 'channel');
+  if (!ch) return send(res, 404, { error: 'Only custom channels can be deleted' });
+  data.messages = data.messages.filter(m => m.channel_id !== ch.id);
+  data.channels = data.channels.filter(c => c.id !== ch.id);
+  save();
+  send(res, 200, { ok: true });
+}, { level: 'admin' });
 on('POST', '/api/chat/dm', (req, res) => {
   const other = userById(Number((req.body || {}).user_id));
   if (!other || !other.active) return send(res, 404, { error: 'User not found' });
@@ -948,6 +1030,7 @@ on('GET', '/api/chat/messages', (req, res) => {
   const ch = data.channels.find(c => c.id === Number(req.query.channel_id));
   if (!ch) return send(res, 404, { error: 'Channel not found' });
   if (ch.type === 'dm' && !(ch.member_ids || []).includes(req.user.id)) return send(res, 403, { error: 'Not your conversation' });
+  if (ch.type !== 'dm' && rank(req.user) < (RANK[ch.min_level || 'slinger'] || 0)) return send(res, 403, { error: 'This channel is for leadership' });
   const after = Number(req.query.after) || 0;
   let msgs = data.messages.filter(m => m.channel_id === ch.id && m.id > after);
   if (!after) msgs = msgs.slice(-100);
@@ -963,6 +1046,7 @@ on('POST', '/api/chat/messages', (req, res) => {
   const ch = data.channels.find(c => c.id === Number(b.channel_id));
   if (!ch) return send(res, 404, { error: 'Channel not found' });
   if (ch.type === 'dm' && !(ch.member_ids || []).includes(req.user.id)) return send(res, 403, { error: 'Not your conversation' });
+  if (ch.type !== 'dm' && rank(req.user) < (RANK[ch.min_level || 'slinger'] || 0)) return send(res, 403, { error: 'This channel is for leadership' });
   const text = String(b.text || '').trim().slice(0, 4000);
   let file = null, fileName = null, fileType = null;
   if (b.file) {
@@ -1117,6 +1201,136 @@ on('GET', '/api/submissions/:id', (req, res) => {
   });
 }, { level: 'manager' });
 
+
+// ---------- opportunities ----------
+function notifyLeaders(title, body) {
+  const ids = new Set(data.users.filter(u => u.active && rank(u) >= 1).map(u => u.id));
+  ids.forEach(id => engine.notify(id, title, body));
+}
+function postingOut(p, userId) {
+  const apps = data.applications.filter(a => a.posting_id === p.id);
+  const mine = apps.find(a => a.user_id === userId);
+  return {
+    ...p, author_name: (userById(p.author_id) || {}).name || '—',
+    applicant_count: apps.filter(a => a.status === 'pending').length,
+    my_application: mine ? mine.status : null,
+  };
+}
+on('GET', '/api/opportunities', (req, res) => {
+  const postings = (data.postings || [])
+    .filter(p => rank(req.user) >= 1 || p.status === 'open')
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .map(p => postingOut(p, req.user.id));
+  const out = { postings };
+  if (rank(req.user) >= 1) {
+    out.applications = data.applications.filter(a => a.status === 'pending').map(a => ({
+      ...a, user_name: (userById(a.user_id) || {}).name || '—',
+      posting_title: ((data.postings.find(p => p.id === a.posting_id) || {}).title) || '?',
+    }));
+    out.referrals = data.referrals.filter(r => r.status === 'new').map(r => ({
+      ...r, user_name: (userById(r.user_id) || {}).name || '—',
+      posting_title: r.posting_id ? (((data.postings.find(p => p.id === r.posting_id) || {}).title) || null) : null,
+    }));
+    out.suggestions = data.suggestions.filter(s => s.status === 'new').map(s => ({
+      ...s, user_name: (userById(s.user_id) || {}).name || '—',
+    }));
+  }
+  send(res, 200, out);
+}, { auth: true });
+on('POST', '/api/opportunities', (req, res) => {
+  const b = req.body || {};
+  const title = String(b.title || '').trim();
+  if (!title) return send(res, 400, { error: 'Give it a title' });
+  const p = {
+    id: nextId('posting'), kind: ['event', 'flagship', 'role'].includes(b.kind) ? b.kind : 'event',
+    title, description: String(b.description || '').trim() || null,
+    requirements: String(b.requirements || '').trim() || null,
+    when_text: String(b.when_text || '').trim() || null,
+    where_text: String(b.where_text || '').trim() || null,
+    status: 'open', author_id: req.user.id, created_at: new Date().toISOString(),
+  };
+  data.postings.push(p); save();
+  send(res, 200, postingOut(p, req.user.id));
+}, { level: 'manager' });
+on('PUT', '/api/opportunities/:id', (req, res) => {
+  const p = data.postings.find(x => x.id === Number(req.params.id));
+  if (!p) return send(res, 404, { error: 'Not found' });
+  const b = req.body || {};
+  ['title', 'description', 'requirements', 'when_text', 'where_text'].forEach(k => { if (b[k] !== undefined) p[k] = String(b[k] || '').trim() || null; });
+  if (b.kind && ['event', 'flagship', 'role'].includes(b.kind)) p.kind = b.kind;
+  if (b.status && ['open', 'closed'].includes(b.status)) p.status = b.status;
+  save();
+  send(res, 200, { ok: true });
+}, { level: 'manager' });
+on('DELETE', '/api/opportunities/:id', (req, res) => {
+  data.postings = data.postings.filter(x => x.id !== Number(req.params.id));
+  save();
+  send(res, 200, { ok: true });
+}, { level: 'manager' });
+on('POST', '/api/opportunities/:id/apply', (req, res) => {
+  const p = data.postings.find(x => x.id === Number(req.params.id) && x.status === 'open');
+  if (!p) return send(res, 404, { error: 'That opportunity is no longer open' });
+  if (data.applications.some(a => a.posting_id === p.id && a.user_id === req.user.id))
+    return send(res, 409, { error: 'You already applied' });
+  data.applications.push({
+    id: nextId('application'), posting_id: p.id, user_id: req.user.id,
+    note: String((req.body || {}).note || '').trim().slice(0, 1000) || null,
+    status: 'pending', created_at: new Date().toISOString(), decided_by: null,
+  });
+  save();
+  notifyLeaders('🙋 New application', `${req.user.name} applied for “${p.title}”`);
+  send(res, 200, { ok: true });
+}, { auth: true });
+on('POST', '/api/applications/:id/decide', (req, res) => {
+  const a = data.applications.find(x => x.id === Number(req.params.id));
+  if (!a || a.status !== 'pending') return send(res, 404, { error: 'Application not found or decided' });
+  const p = data.postings.find(x => x.id === a.posting_id);
+  const accept = !!(req.body || {}).accept;
+  a.status = accept ? 'accepted' : 'declined';
+  a.decided_by = req.user.id;
+  save();
+  engine.notify(a.user_id, accept ? '🎉 Application accepted!' : 'Application update',
+    accept ? `You're in for “${p ? p.title : 'the opportunity'}” — ${req.user.name} will follow up with details.`
+      : `“${p ? p.title : 'The opportunity'}” went another direction this time — keep applying!`);
+  send(res, 200, { ok: true });
+}, { level: 'manager' });
+on('POST', '/api/referrals', (req, res) => {
+  const b = req.body || {};
+  const name = String(b.friend_name || '').trim();
+  if (!name) return send(res, 400, { error: "Friend's name required" });
+  data.referrals.push({
+    id: nextId('referral'), posting_id: Number(b.posting_id) || null, user_id: req.user.id,
+    friend_name: name, friend_contact: String(b.friend_contact || '').trim() || null,
+    note: String(b.note || '').trim().slice(0, 500) || null,
+    status: 'new', created_at: new Date().toISOString(),
+  });
+  save();
+  notifyLeaders('🤝 New referral', `${req.user.name} referred ${name}`);
+  send(res, 200, { ok: true });
+}, { auth: true });
+on('POST', '/api/referrals/:id/handled', (req, res) => {
+  const r = data.referrals.find(x => x.id === Number(req.params.id));
+  if (r) { r.status = 'contacted'; save(); }
+  send(res, 200, { ok: true });
+}, { level: 'manager' });
+on('POST', '/api/suggestions', (req, res) => {
+  const b = req.body || {};
+  const title = String(b.title || '').trim();
+  if (!title) return send(res, 400, { error: 'Where should we set up? Give it a name' });
+  data.suggestions.push({
+    id: nextId('suggestion'), user_id: req.user.id, title,
+    details: String(b.details || '').trim().slice(0, 1000) || null,
+    status: 'new', created_at: new Date().toISOString(),
+  });
+  save();
+  notifyLeaders('💡 New spot suggestion', `${req.user.name} suggested: ${title}`);
+  send(res, 200, { ok: true });
+}, { auth: true });
+on('POST', '/api/suggestions/:id/handled', (req, res) => {
+  const s = data.suggestions.find(x => x.id === Number(req.params.id));
+  if (s) { s.status = 'reviewed'; save(); }
+  send(res, 200, { ok: true });
+}, { level: 'manager' });
 
 // ---------- reports ----------
 function submissionTerritory(s) {

@@ -116,6 +116,32 @@ function migrate(d) {
     (d.shifts || []).forEach(x => { if (!x.notes_feed) x.notes_feed = []; }); // { id, user_id, text, file, file_name, file_type, created_at }
     changed = true;
   }
+  if (d.version < 8) {
+    d.version = 8;
+    // named chat channels (replaces territory-based channels)
+    (d.channels || []).forEach(c => {
+      if (c.type === 'territory') { c.type = 'channel'; c.territory_id = null; }
+      if (c.min_level === undefined) c.min_level = 'slinger';
+    });
+    const wanted = [
+      ['Bar', 'slinger'], ['Retail Ops', 'slinger'], ['Catering Ops', 'slinger'],
+      ['Outpost Ops', 'slinger'], ['Leadership', 'manager'],
+    ];
+    for (const [name, lvl] of wanted) {
+      if (!d.channels.some(c => c.type !== 'dm' && c.name.toLowerCase() === name.toLowerCase())) {
+        d.seq.channel = (d.seq.channel || 0) + 1;
+        d.channels.push({ id: d.seq.channel, name, type: 'channel', territory_id: null, member_ids: null, min_level: lvl });
+      }
+    }
+    // opportunities
+    d.postings = d.postings || [];         // { id, kind: 'event'|'flagship'|'role', title, description, requirements, when_text, where_text, status: 'open'|'closed', author_id, created_at }
+    d.applications = d.applications || []; // { id, posting_id, user_id, note, status: 'pending'|'accepted'|'declined', created_at, decided_by }
+    d.referrals = d.referrals || [];       // { id, posting_id|null, user_id, friend_name, friend_contact, note, created_at, status: 'new'|'contacted' }
+    d.suggestions = d.suggestions || [];   // { id, user_id, title, details, created_at, status: 'new'|'reviewed' }
+    // email sign-in
+    d.login_tokens = d.login_tokens || []; // { token_hash, user_id, exp }
+    changed = true;
+  }
   if (changed) setTimeout(() => persist(), 0);
 }
 
@@ -125,7 +151,7 @@ function seed() {
     version: 3,
     seq: {
       category: 4, territory: 2, location: 6, user: 5, checklist: 3, item: 16,
-      submission: 0, shift: 0, instance: 0, notification: 0, push: 0, channel: 3, message: 0,
+      submission: 0, shift: 0, instance: 0, notification: 0, push: 0, channel: 6, message: 0,
     },
     categories: [
       { id: 1, name: 'Everyday Carts' }, { id: 2, name: 'Extra Special Carts' },
@@ -192,10 +218,13 @@ function seed() {
     push_subs: [],
     settings: {},
     submissions: [],
-    channels: [       // { id, name, type: 'general'|'territory'|'dm', territory_id, member_ids }
-      { id: 1, name: 'general', type: 'general', territory_id: null, member_ids: null },
-      { id: 2, name: 'Atlanta — East', type: 'territory', territory_id: 1, member_ids: null },
-      { id: 3, name: 'Atlanta — West', type: 'territory', territory_id: 2, member_ids: null },
+    channels: [       // { id, name, type: 'general'|'channel'|'dm', member_ids, min_level }
+      { id: 1, name: 'general', type: 'general', territory_id: null, member_ids: null, min_level: 'slinger' },
+      { id: 2, name: 'Bar', type: 'channel', territory_id: null, member_ids: null, min_level: 'slinger' },
+      { id: 3, name: 'Retail Ops', type: 'channel', territory_id: null, member_ids: null, min_level: 'slinger' },
+      { id: 4, name: 'Catering Ops', type: 'channel', territory_id: null, member_ids: null, min_level: 'slinger' },
+      { id: 5, name: 'Outpost Ops', type: 'channel', territory_id: null, member_ids: null, min_level: 'slinger' },
+      { id: 6, name: 'Leadership', type: 'channel', territory_id: null, member_ids: null, min_level: 'manager' },
     ],
     messages: [],     // { id, channel_id, user_id, text, file, file_name, file_type, created_at }
     reads: [],        // { user_id, channel_id, last_read_id }
@@ -203,8 +232,9 @@ function seed() {
     open_shifts: [],
     shift_requests: [],
     announcements: [],
+    postings: [], applications: [], referrals: [], suggestions: [], login_tokens: [],
   };
-  d.version = 7;
+  d.version = 8;
   setTimeout(() => persist(), 0);
   return d;
 }
