@@ -558,7 +558,7 @@ function openChecklist(c, instanceId, refresh) {
       field = `<button type="button" class="photo-drop" data-item="${it.id}">📷 Tap to add photo</button>
         <input type="file" accept="image/*" capture="environment" hidden data-file="${it.id}">`;
     const labelHtml = it.type === 'checkbox' ? '' : `<div class="item-label">${esc(it.label)} ${req} ${range}</div>`;
-    return `<div class="item-row" data-row="${it.id}"${it.cond_item_id ? ` data-cond-item="${it.cond_item_id}" data-cond-value="${esc(it.cond_value ?? '')}" style="display:none"` : ''}>${labelHtml}${field}</div>`;
+    return `<div class="item-row" data-row="${it.id}"${it.cond_item_id ? ` data-cond-item="${it.cond_item_id}" data-cond-op="${esc(it.cond_op || 'eq')}" data-cond-value="${esc(it.cond_value ?? '')}" style="display:none"` : ''}>${labelHtml}${field}</div>`;
   }).join('');
 
   const bg = modal(`
@@ -569,11 +569,28 @@ function openChecklist(c, instanceId, refresh) {
   `);
 
   const answers = {}, photos = {};
+  const rowVisible = (row, depth = 0) => {
+    if (!row || !row.dataset.condItem || depth > 20) return true;
+    const parent = bg.querySelector(`.item-row[data-row="${row.dataset.condItem}"]`);
+    if (parent && !rowVisible(parent, depth + 1)) return false;
+    const raw = answers[row.dataset.condItem];
+    const op = row.dataset.condOp || 'eq';
+    if (op === 'gt' || op === 'gte' || op === 'lt' || op === 'lte') {
+      const n = Number(raw), t = Number(row.dataset.condValue);
+      if (raw == null || String(raw).trim() === '' || isNaN(n) || isNaN(t)) return false;
+      return op === 'gt' ? n > t : op === 'gte' ? n >= t : op === 'lt' ? n < t : n <= t;
+    }
+    const x = String(raw ?? '').trim(), y = String(row.dataset.condValue ?? '').trim();
+    if (op === 'ne') return x !== '' && x !== y;
+    return x === y;
+  };
   const updateVisibility = () => {
-    bg.querySelectorAll('[data-cond-item]').forEach(row => {
-      const show = String(answers[row.dataset.condItem] ?? '') === row.dataset.condValue;
-      row.style.display = show ? '' : 'none';
-    });
+    // repeat so chains settle
+    for (let pass = 0; pass < 3; pass++) {
+      bg.querySelectorAll('[data-cond-item]').forEach(row => {
+        row.style.display = rowVisible(row) ? '' : 'none';
+      });
+    }
   };
   bg.querySelectorAll('.checkbig').forEach(b => b.onclick = () => {
     b.classList.toggle('on');
@@ -593,7 +610,7 @@ function openChecklist(c, instanceId, refresh) {
     updateVisibility();
   }));
   bg.querySelectorAll('input[type=number],textarea').forEach(el =>
-    el.oninput = () => answers[el.dataset.item] = el.value);
+    el.oninput = () => { answers[el.dataset.item] = el.value; updateVisibility(); });
   bg.querySelectorAll('.photo-drop').forEach(btn => {
     const file = bg.querySelector(`input[data-file="${btn.dataset.item}"]`);
     btn.onclick = () => file.click();
@@ -1266,21 +1283,36 @@ function checklistBuilder(cl, carts, cats, onSave) {
           <button type="button" class="btn ghost mini" data-down="${i}" ${i === items.length - 1 ? 'disabled' : ''}>↓</button>
           <button type="button" class="btn danger mini" data-rm="${i}">✕</button>
           ${(() => {
-            // controlling items must be ABOVE this one and answerable (choice / yes-no)
-            const ctrls = items.map((x, xi) => ({ x, xi })).filter(({ x, xi }) => xi < i && (x.type === 'choice' || x.type === 'yesno') && x.label);
+            // controlling items must be ABOVE this one and answerable
+            const CTRL_TYPES = ['choice', 'yesno', 'number', 'checkbox'];
+            const ctrls = items.map((x, xi) => ({ x, xi })).filter(({ x, xi }) => xi < i && CTRL_TYPES.includes(x.type) && x.label);
             if (!ctrls.length) return '';
             const ctrlSel = `<select data-condi="${i}" style="flex:2;min-width:150px">
               <option value="">Always shown</option>
               ${ctrls.map(({ x, xi }) => `<option value="${xi}" ${it.cond_index === xi ? 'selected' : ''}>If “${esc(x.label.slice(0, 30))}”…</option>`).join('')}</select>`;
-            let valSel = '';
+            let rest = '';
             if (it.cond_index != null && items[it.cond_index]) {
               const ctrl = items[it.cond_index];
-              const opts = ctrl.type === 'yesno' ? ['yes', 'no'] : String(ctrl.options || '').split(',').map(s => s.trim()).filter(Boolean);
-              valSel = `<select data-condv="${i}" style="flex:1;min-width:100px">
-                ${opts.map(o => `<option value="${esc(o)}" ${String(it.cond_value) === o ? 'selected' : ''}>= ${esc(o)}</option>`).join('')}</select>`;
+              const isNum = ctrl.type === 'number';
+              const ops = isNum
+                ? [['lt', 'is below'], ['lte', 'is at most'], ['gt', 'is above'], ['gte', 'is at least'], ['eq', 'equals'], ['ne', 'is not']]
+                : [['eq', 'is'], ['ne', 'is not']];
+              const opSel = `<select data-condop="${i}" style="flex:1;min-width:110px">
+                ${ops.map(([v, l]) => `<option value="${v}" ${(it.cond_op || 'eq') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+              let valInput;
+              if (isNum) {
+                valInput = `<input type="number" step="any" data-condv="${i}" value="${esc(it.cond_value ?? '')}" placeholder="value${ctrl.unit ? ' (' + esc(ctrl.unit) + ')' : ''}" style="flex:1;min-width:90px">`;
+              } else {
+                const opts = ctrl.type === 'yesno' ? ['yes', 'no']
+                  : ctrl.type === 'checkbox' ? ['yes', '']
+                    : String(ctrl.options || '').split(',').map(s => s.trim()).filter(Boolean);
+                valInput = `<select data-condv="${i}" style="flex:1;min-width:100px">
+                  ${opts.map(o => `<option value="${esc(o)}" ${String(it.cond_value ?? '') === o ? 'selected' : ''}>${ctrl.type === 'checkbox' ? (o === 'yes' ? 'checked' : 'unchecked') : esc(o)}</option>`).join('')}</select>`;
+              }
+              rest = opSel + valInput;
             }
-            return `<div class="wide" style="display:flex;gap:6px;align-items:center;background:var(--cream);border-radius:10px;padding:6px 8px">
-              <span style="font-size:12px;font-weight:800;color:var(--ink-soft)">🔀</span>${ctrlSel}${valSel}</div>`;
+            return `<div class="wide" style="display:flex;gap:6px;align-items:center;background:var(--cream);border-radius:10px;padding:6px 8px;flex-wrap:wrap">
+              <span style="font-size:12px;font-weight:800;color:var(--ink-soft)">🔀 Show this</span>${ctrlSel}${rest}</div>`;
           })()}
         </div>
       </div>`).join('');
@@ -1294,16 +1326,26 @@ function checklistBuilder(cl, carts, cats, onSave) {
       it.cond_index = el.value === '' ? null : Number(el.value);
       if (it.cond_index != null) {
         const ctrl = items[it.cond_index];
-        const opts = ctrl.type === 'yesno' ? ['yes', 'no'] : String(ctrl.options || '').split(',').map(s => s.trim()).filter(Boolean);
-        it.cond_value = opts[0] || null;
-      } else it.cond_value = null;
+        if (ctrl.type === 'number') { it.cond_op = 'gt'; it.cond_value = ''; }
+        else {
+          it.cond_op = 'eq';
+          const opts = ctrl.type === 'yesno' ? ['yes', 'no'] : ctrl.type === 'checkbox' ? ['yes', ''] :
+            String(ctrl.options || '').split(',').map(s => s.trim()).filter(Boolean);
+          it.cond_value = opts[0] ?? null;
+        }
+      } else { it.cond_value = null; it.cond_op = 'eq'; }
       drawItems();
     });
-    itemsEl.querySelectorAll('[data-condv]').forEach(el => el.onchange = () => { items[el.dataset.condv].cond_value = el.value; });
+    itemsEl.querySelectorAll('[data-condop]').forEach(el => el.onchange = () => { items[el.dataset.condop].cond_op = el.value; });
+    itemsEl.querySelectorAll('[data-condv]').forEach(el => {
+      const set = () => items[el.dataset.condv].cond_value = el.value;
+      el.onchange = set; el.oninput = set;
+    });
     itemsEl.querySelectorAll('[data-req]').forEach(el => el.onclick = () => { const it = items[el.dataset.req]; it.required = it.required ? 0 : 1; drawItems(); });
     const fixConds = () => items.forEach(x => {
-      if (x.cond_index != null && (!items[x.cond_index] || items.indexOf(x) <= x.cond_index ||
-        !(items[x.cond_index].type === 'choice' || items[x.cond_index].type === 'yesno'))) { x.cond_index = null; x.cond_value = null; }
+      const ok = x.cond_index != null && items[x.cond_index] && x.cond_index < items.indexOf(x) &&
+        ['choice', 'yesno', 'number', 'checkbox'].includes(items[x.cond_index].type);
+      if (x.cond_index != null && !ok) { x.cond_index = null; x.cond_value = null; x.cond_op = 'eq'; }
     });
     itemsEl.querySelectorAll('[data-rm]').forEach(el => el.onclick = () => { items.splice(el.dataset.rm, 1); items.forEach(x => { if (x.cond_index != null && x.cond_index >= items.length) { x.cond_index = null; x.cond_value = null; } }); fixConds(); drawItems(); });
     itemsEl.querySelectorAll('[data-up]').forEach(el => el.onclick = () => { const i = +el.dataset.up; [items[i - 1], items[i]] = [items[i], items[i - 1]]; fixConds(); drawItems(); });

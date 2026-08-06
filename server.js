@@ -668,20 +668,30 @@ on('GET', '/api/checklists', (req, res) => {
 // convert builder's cond_index (position of controlling item) into a stable cond_item_id
 function resolveConds(items) {
   items.forEach(it => {
-    if (it.cond_index != null && items[it.cond_index] && it.cond_index !== items.indexOf(it)) {
+    if (it.cond_index != null && items[it.cond_index] && it.cond_index < items.indexOf(it)) {
       it.cond_item_id = items[it.cond_index].id;
     } else {
-      it.cond_item_id = null; it.cond_value = it.cond_index != null ? it.cond_value : it.cond_value ?? null;
-      if (it.cond_item_id == null) it.cond_value = null;
+      it.cond_item_id = null; it.cond_value = null; it.cond_op = 'eq';
     }
     delete it.cond_index;
   });
 }
-function itemVisible(it, items, answers) {
-  if (!it.cond_item_id) return true;
+// true if/then: supports = ≠ > ≥ < ≤ and chains (a sub-question of a hidden question stays hidden)
+function itemVisible(it, items, answers, depth = 0) {
+  if (!it.cond_item_id || depth > 20) return true;
   const ctrl = items.find(x => x.id === it.cond_item_id);
   if (!ctrl) return true;
-  return String(answers[ctrl.id] ?? '') === String(it.cond_value ?? '');
+  if (!itemVisible(ctrl, items, answers, depth + 1)) return false;
+  const raw = answers[ctrl.id];
+  const op = it.cond_op || 'eq';
+  if (op === 'gt' || op === 'gte' || op === 'lt' || op === 'lte') {
+    const n = Number(raw), t = Number(it.cond_value);
+    if (raw == null || String(raw).trim() === '' || isNaN(n) || isNaN(t)) return false;
+    return op === 'gt' ? n > t : op === 'gte' ? n >= t : op === 'lt' ? n < t : n <= t;
+  }
+  const a = String(raw ?? '').trim(), b = String(it.cond_value ?? '').trim();
+  if (op === 'ne') return a !== '' && a !== b;
+  return a === b;
 }
 function normalizeItems(items) {
   return (items || []).filter(i => i && i.label && String(i.label).trim()).map((it, i) => ({
@@ -689,6 +699,7 @@ function normalizeItems(items) {
     required: it.required ? 1 : 0, unit: it.unit || null,
     options: it.options ? String(it.options).trim() : null,
     cond_index: it.cond_index === '' || it.cond_index == null ? null : Number(it.cond_index),
+    cond_op: ['eq', 'ne', 'gt', 'gte', 'lt', 'lte'].includes(it.cond_op) ? it.cond_op : 'eq',
     cond_value: it.cond_value != null && String(it.cond_value) !== '' ? String(it.cond_value) : null,
     min: it.min === '' || it.min == null ? null : Number(it.min),
     max: it.max === '' || it.max == null ? null : Number(it.max),

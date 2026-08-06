@@ -64,7 +64,8 @@ Open http://localhost:3000 — admin login: **chris.moye@kingofpops.com / popsic
 
 - **Carts & Spots** (Carts tab) are grouped into categories: Everyday Carts, Extra Special Carts, Catering Carts, Brick & Mortar (edit/add as you like). Each cart has **notifiers** — the people alerted when its checklists go overdue.
 - **Checklists** have a trigger: ☀️ Opening (start of shift), 🌙 Closing (30 min before end), or 📅 Daily (fixed schedule, like kitchen sanitation). Scope any checklist to a specific cart, a category, or a role.
-- Item types: checkbox, yes/no, number (with OK-range + unit — out-of-range answers get flagged ⚑), text, photo.
+- Item types: checkbox, yes/no, multiple choice, number (with OK-range + unit — out-of-range answers get flagged ⚑), text, photo.
+- **If/then branching**: any item can be set to show only when an earlier answer matches a condition — `is` / `is not` for choice, yes/no and checkbox, and `is below / at most / above / at least / equals / is not` for numbers. Example: *Freezer temperature* → if above 0°F, show *What did you find?* → if that's *Unit failure*, show *Photo of the unit*. Conditions chain as deep as you like; hidden questions aren't required and are recorded as skipped.
 
 ## Push notifications on phones
 
