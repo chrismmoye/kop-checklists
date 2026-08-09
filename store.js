@@ -142,6 +142,15 @@ function migrate(d) {
     d.login_tokens = d.login_tokens || []; // { token_hash, user_id, exp }
     changed = true;
   }
+  if (d.version < 9) {
+    d.version = 9;
+    (d.locations || []).forEach(l => {
+      if (!l.keywords) l.keywords = [];      // extra phrases that map Square shift notes to this spot
+      if (!l.flavor_ids) l.flavor_ids = [];  // flavor strategy
+    });
+    d.flavors = d.flavors || [];             // { id, name, emoji, note, in_stock, created_at }
+    changed = true;
+  }
   if (changed) setTimeout(() => persist(), 0);
 }
 
@@ -162,12 +171,12 @@ function seed() {
       { id: 2, name: 'Atlanta — West', square_location_id: null, square_location_name: null },
     ],
     locations: [
-      { id: 1, name: 'Ponce City Market Bar', category_id: 4, territory_id: 1, notifier_ids: [1], active: 1 },
-      { id: 2, name: 'Westside Kitchen', category_id: 4, territory_id: 2, notifier_ids: [1], active: 1 },
-      { id: 3, name: 'Piedmont Park', category_id: 1, territory_id: 1, notifier_ids: [], active: 1 },
-      { id: 4, name: 'Decatur Square', category_id: 1, territory_id: 1, notifier_ids: [], active: 1 },
-      { id: 5, name: 'Freedom Park Festival', category_id: 2, territory_id: 1, notifier_ids: [], active: 1 },
-      { id: 6, name: 'Catering Cart 1', category_id: 3, territory_id: 2, notifier_ids: [], active: 1 },
+      { id: 1, name: 'Ponce City Market Bar', category_id: 4, territory_id: 1, notifier_ids: [1], keywords: [], flavor_ids: [], active: 1 },
+      { id: 2, name: 'Westside Kitchen', category_id: 4, territory_id: 2, notifier_ids: [1], keywords: [], flavor_ids: [], active: 1 },
+      { id: 3, name: 'Piedmont Park', category_id: 1, territory_id: 1, notifier_ids: [], keywords: [], flavor_ids: [], active: 1 },
+      { id: 4, name: 'Decatur Square', category_id: 1, territory_id: 1, notifier_ids: [], keywords: [], flavor_ids: [], active: 1 },
+      { id: 5, name: 'Freedom Park Festival', category_id: 2, territory_id: 1, notifier_ids: [], keywords: [], flavor_ids: [], active: 1 },
+      { id: 6, name: 'Catering Cart 1', category_id: 3, territory_id: 2, notifier_ids: [], keywords: [], flavor_ids: [], active: 1 },
     ],
     users: [
       { id: 1, name: 'Chris Moye', email: 'chris.moye@kingofpops.com', password_hash: hashPassword('popsicle1'), level: 'admin', is_admin: 1, job_role: 'Admin', location_id: null, territory_ids: [], square_team_member_id: null, active: 1 },
@@ -232,9 +241,9 @@ function seed() {
     open_shifts: [],
     shift_requests: [],
     announcements: [],
-    postings: [], applications: [], referrals: [], suggestions: [], login_tokens: [],
+    postings: [], applications: [], referrals: [], suggestions: [], login_tokens: [], flavors: [],
   };
-  d.version = 8;
+  d.version = 9;
   setTimeout(() => persist(), 0);
   return d;
 }

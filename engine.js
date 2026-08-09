@@ -101,17 +101,46 @@ function terrBySquareLoc(locId) {
   return (data.territories || []).find(t => t.square_location_id === locId) || null;
 }
 
-// Find the cart whose name appears in the shift notes (longest match wins)
+// Find the spot whose name OR learned keyword appears in the shift notes (longest match wins).
+// Keywords let e.g. "12th St", "Charles Allen", "Active Oval" all map to distinct Piedmont Park spots.
+function spotPhrases(cart) {
+  const out = [cart.name, ...(cart.keywords || [])];
+  // "Piedmont Park — Active Oval" also matches notes that only say "Active Oval"
+  String(cart.name).split(/[—–\-:|]/).map(s => s.trim()).filter(s => s.length >= 4).forEach(s => out.push(s));
+  return [...new Set(out.map(p => String(p).toLowerCase().trim()).filter(Boolean))];
+}
 function matchCart(notes) {
   if (!notes) return null;
-  const hay = notes.toLowerCase();
-  let best = null;
+  const hay = String(notes).toLowerCase();
+  let best = null, bestLen = 0;
   for (const cart of data.locations.filter(l => l.active)) {
-    if (hay.includes(cart.name.toLowerCase())) {
-      if (!best || cart.name.length > best.name.length) best = cart;
+    for (const p of spotPhrases(cart)) {
+      if (p.length > bestLen && hay.includes(p)) { best = cart; bestLen = p.length; }
     }
   }
   return best;
+}
+// remember a phrase from shift notes so future shifts auto-map to this spot
+function learnKeyword(cartId, phrase) {
+  const cart = data.locations.find(l => l.id === cartId);
+  const p = String(phrase || '').trim();
+  if (!cart || !p || p.length > 80) return false;
+  cart.keywords = cart.keywords || [];
+  const exists = cart.keywords.some(k => k.toLowerCase() === p.toLowerCase()) ||
+    cart.name.toLowerCase() === p.toLowerCase();
+  if (!exists) { cart.keywords.push(p); save(); return true; }
+  return false;
+}
+// suggest phrases from a note that don't yet match any spot
+function keywordSuggestions(notes) {
+  const raw = String(notes || '').trim();
+  if (!raw) return [];
+  const parts = raw.split(/[,;\/|\n]+|\s-\s/).map(s => s.trim()).filter(s => s.length > 2 && s.length < 60);
+  const out = [];
+  for (const p of [raw, ...parts]) {
+    if (!out.some(x => x.toLowerCase() === p.toLowerCase())) out.push(p);
+  }
+  return out.slice(0, 6);
 }
 
 async function syncShifts() {
@@ -376,6 +405,7 @@ function start() {
 
 module.exports = {
   start, tick, syncSquare, importTeam, generateInstances, markOverdue, notify, businessDate,
+  matchCart, learnKeyword, keywordSuggestions,
   populateNow, listSquareLocations, clockInSquare, clockOutSquare,
   DUE_MINUTES, CLOSING_LEAD_MINUTES,
 };

@@ -63,6 +63,9 @@ function cartOut(l) {
     ...l, category_name: l.category_id ? (catById(l.category_id) || {}).name : null,
     territory_name: l.territory_id ? (terrById(l.territory_id) || {}).name : null,
     notifier_names: (l.notifier_ids || []).map(id => (userById(id) || {}).name).filter(Boolean),
+    keywords: l.keywords || [],
+    flavor_ids: l.flavor_ids || [],
+    flavors: (l.flavor_ids || []).map(id => (data.flavors || []).find(f => f.id === id)).filter(Boolean),
   };
 }
 function shiftOut(s) {
@@ -245,6 +248,56 @@ on('GET', '/api/today', (req, res) => {
 
   send(res, 200, { date, checklists: daily, instances, shift: myShift ? shiftOut(myShift) : null });
 }, { auth: true });
+
+// ---------- populate a checklist manually ----------
+// slingers may add checklists for their own job role (or role-agnostic ones); managers+ may add any
+function canPopulate(user, c) {
+  if (!c.active) return false;
+  if (rank(user) >= 1) return true;
+  if (!c.job_role) return true;
+  return String(c.job_role).toLowerCase() === String(user.job_role || '').toLowerCase();
+}
+on('GET', '/api/checklists/available', (req, res) => {
+  const rows = data.checklists.filter(c => canPopulate(req.user, c))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(c => ({ id: c.id, name: c.name, emoji: c.emoji, trigger: c.trigger, job_role: c.job_role, item_count: c.items.length }));
+  send(res, 200, rows);
+}, { auth: true });
+function createInstance(checklist, user, cartId, assignedBy) {
+  const cart = cartId ? cartById(cartId) : null;
+  const now = new Date();
+  const inst = {
+    id: nextId('instance'), type: checklist.trigger === 'closing' ? 'closing' : checklist.trigger === 'opening' ? 'opening' : 'daily',
+    checklist_id: checklist.id, shift_id: null, user_id: user.id,
+    cart_id: cart ? cart.id : null, territory_id: cart ? (cart.territory_id || null) : null,
+    date: businessDate(),
+    populate_at: now.toISOString(),
+    due_at: new Date(now.getTime() + 60 * 60000).toISOString(),
+    status: 'pending', submission_id: null, alerted: 0,
+    assigned_by: assignedBy || null,
+  };
+  data.instances.push(inst); save();
+  return inst;
+}
+on('POST', '/api/instances/self', (req, res) => {
+  const b = req.body || {};
+  const c = data.checklists.find(x => x.id === Number(b.checklist_id));
+  if (!c || !canPopulate(req.user, c)) return send(res, 403, { error: "That checklist isn't available for your role" });
+  const dup = data.instances.find(i => i.user_id === req.user.id && i.checklist_id === c.id && i.date === businessDate() && i.status !== 'complete');
+  if (dup) return send(res, 409, { error: "You already have that checklist open today" });
+  const inst = createInstance(c, req.user, b.cart_id ? Number(b.cart_id) : null, null);
+  send(res, 200, instanceOut(inst));
+}, { auth: true });
+on('POST', '/api/instances/assign', (req, res) => {
+  const b = req.body || {};
+  const c = data.checklists.find(x => x.id === Number(b.checklist_id));
+  const u = userById(Number(b.user_id));
+  if (!c) return send(res, 404, { error: 'Checklist not found' });
+  if (!u || !u.active) return send(res, 404, { error: 'Teammate not found' });
+  const inst = createInstance(c, u, b.cart_id ? Number(b.cart_id) : null, req.user.id);
+  engine.notify(u.id, '📋 Checklist assigned', `${req.user.name} assigned you “${c.name}” — due within the hour`);
+  send(res, 200, instanceOut(inst));
+}, { level: 'manager' });
 
 // ---------- clock in / out (feeds Square timecards) ----------
 function openTimecard(userId) {
@@ -576,7 +629,9 @@ on('POST', '/api/locations', (req, res) => {
     return send(res, 400, { error: 'That location already exists' });
   const loc = {
     id: nextId('location'), name, category_id: b.category_id || null, territory_id: b.territory_id || null,
-    notifier_ids: (b.notifier_ids || []).map(Number), active: 1,
+    notifier_ids: (b.notifier_ids || []).map(Number),
+    keywords: (b.keywords || []).map(k => String(k).trim()).filter(Boolean),
+    flavor_ids: (b.flavor_ids || []).map(Number), active: 1,
   };
   data.locations.push(loc); save();
   send(res, 200, cartOut(loc));
@@ -589,14 +644,80 @@ on('PUT', '/api/locations/:id', (req, res) => {
   if (b.category_id !== undefined) l.category_id = b.category_id || null;
   if (b.territory_id !== undefined) l.territory_id = b.territory_id || null;
   if (b.notifier_ids !== undefined) l.notifier_ids = (b.notifier_ids || []).map(Number);
+  if (b.keywords !== undefined) l.keywords = (b.keywords || []).map(k => String(k).trim()).filter(Boolean);
+  if (b.flavor_ids !== undefined) l.flavor_ids = (b.flavor_ids || []).map(Number);
   save();
   send(res, 200, cartOut(l));
 }, { level: 'admin' });
+on('POST', '/api/locations/rematch', (req, res) => {
+  let fixed = 0;
+  for (const s of data.shifts) {
+    if (s.cart_id || !s.notes) continue;
+    const cart = engine.matchCart(s.notes);
+    if (cart) {
+      s.cart_id = cart.id;
+      if (cart.territory_id) s.territory_id = cart.territory_id;
+      data.instances.forEach(i => {
+        if (i.shift_id === s.id && i.status !== 'complete') { i.cart_id = cart.id; i.territory_id = cart.territory_id || i.territory_id; }
+      });
+      fixed++;
+    }
+  }
+  for (const o of data.open_shifts) {
+    if (o.cart_id || !o.notes) continue;
+    const cart = engine.matchCart(o.notes);
+    if (cart) { o.cart_id = cart.id; if (cart.territory_id) o.territory_id = cart.territory_id; fixed++; }
+  }
+  save();
+  send(res, 200, { ok: true, fixed });
+}, { level: 'manager' });
 on('DELETE', '/api/locations/:id', (req, res) => {
   const l = cartById(Number(req.params.id));
   if (l) { l.active = 0; save(); }
   send(res, 200, { ok: true });
 }, { level: 'admin' });
+
+// ---------- flavors (flavor strategy) ----------
+on('GET', '/api/flavors', (req, res) => {
+  send(res, 200, (data.flavors || []).slice().sort((a, b) => (b.in_stock - a.in_stock) || a.name.localeCompare(b.name)));
+}, { auth: true });
+on('POST', '/api/flavors', (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  if (!name) return send(res, 400, { error: 'Flavor name required' });
+  const f = {
+    id: nextId('flavor'), name, emoji: String(b.emoji || '🍦').slice(0, 4),
+    note: String(b.note || '').trim() || null, in_stock: b.in_stock === false ? 0 : 1,
+    created_at: new Date().toISOString(),
+  };
+  data.flavors.push(f); save();
+  send(res, 200, f);
+}, { level: 'manager' });
+on('PUT', '/api/flavors/:id', (req, res) => {
+  const f = (data.flavors || []).find(x => x.id === Number(req.params.id));
+  if (!f) return send(res, 404, { error: 'Not found' });
+  const b = req.body || {};
+  if (b.name != null) f.name = String(b.name).trim();
+  if (b.emoji != null) f.emoji = String(b.emoji).slice(0, 4);
+  if (b.note !== undefined) f.note = String(b.note || '').trim() || null;
+  if (b.in_stock !== undefined) f.in_stock = b.in_stock ? 1 : 0;
+  save();
+  send(res, 200, f);
+}, { level: 'manager' });
+on('DELETE', '/api/flavors/:id', (req, res) => {
+  const id = Number(req.params.id);
+  data.flavors = (data.flavors || []).filter(f => f.id !== id);
+  data.locations.forEach(l => { if (l.flavor_ids) l.flavor_ids = l.flavor_ids.filter(x => x !== id); });
+  save();
+  send(res, 200, { ok: true });
+}, { level: 'manager' });
+// what should I pack? (per spot)
+on('GET', '/api/flavors/plan', (req, res) => {
+  const spotId = Number(req.query.spot_id) || null;
+  const spot = spotId ? cartById(spotId) : null;
+  const list = spot ? (spot.flavor_ids || []).map(id => (data.flavors || []).find(f => f.id === id)).filter(Boolean) : [];
+  send(res, 200, { spot_id: spotId, spot_name: spot ? spot.name : null, flavors: list });
+}, { auth: true });
 
 // ---------- users ----------
 on('GET', '/api/users', (req, res) => {
@@ -784,12 +905,15 @@ on('GET', '/api/shifts/:id', (req, res) => {
   const s = data.shifts.find(x => x.id === Number(req.params.id));
   if (!s) return send(res, 404, { error: 'Shift not found' });
   if (!canSeeShift(req.user, s)) return send(res, 403, { error: 'Not your shift' });
-  send(res, 200, shiftDetail(s));
+  const out = shiftDetail(s);
+  if (rank(req.user) >= 1) out.keyword_suggestions = engine.keywordSuggestions(s.notes);
+  send(res, 200, out);
 }, { auth: true });
 on('PUT', '/api/shifts/:id', (req, res) => {
   const s = data.shifts.find(x => x.id === Number(req.params.id));
   if (!s) return send(res, 404, { error: 'Shift not found' });
   const b = req.body || {};
+  if (b.learn_keyword && b.cart_id) engine.learnKeyword(Number(b.cart_id), b.learn_keyword);
   if (b.cart_id !== undefined) {
     const cart = b.cart_id ? cartById(Number(b.cart_id)) : null;
     s.cart_id = cart ? cart.id : null;
@@ -873,6 +997,17 @@ on('POST', '/api/square/import-team', async (req, res) => {
     const result = await engine.importTeam();
     send(res, 200, result);
   } catch (e) { send(res, 400, { error: e.message }); }
+}, { level: 'admin' });
+
+// ---------- reset checklist history (fresh start) ----------
+on('POST', '/api/admin/reset-history', (req, res) => {
+  const before = { submissions: data.submissions.length, instances: data.instances.length };
+  data.submissions = [];
+  data.instances = [];
+  data.seq.submission = 0;
+  data.seq.instance = 0;
+  save();
+  send(res, 200, { ok: true, cleared: before });
 }, { level: 'admin' });
 
 // ---------- backup / restore (for moving between computers or to a server) ----------
@@ -1125,44 +1260,70 @@ on('GET', '/api/dashboard', (req, res) => {
   if (terrFilter) instances = instances.filter(i => (i.cart_id && terrFilter.has(i.cart_id)) || i.territory_id === terrId);
   instances = instances.map(instanceOut);
 
-  // board groups: by exact location when known, else by shift territory
+  // one row per active spot (plus a row for shifts we couldn't match), simple open/closed status
   const board = [];
   let dayShifts = data.shifts.filter(s => s.date === date);
   if (terrFilter) dayShifts = dayShifts.filter(s => (s.cart_id && terrFilter.has(s.cart_id)) || s.territory_id === terrId);
-  const groups = new Map();
-  for (const s of dayShifts) {
-    const key = s.cart_id ? 'c' + s.cart_id : 't' + (s.territory_id || 0);
-    if (!groups.has(key)) groups.set(key, { cart_id: s.cart_id, territory_id: s.territory_id || null, shift_ids: [] });
-    groups.get(key).shift_ids.push(s.id);
-  }
-  for (const g of groups.values()) {
-    const cart = g.cart_id ? cartById(g.cart_id) : null;
-    const terr = !cart && g.territory_id ? terrById(g.territory_id) : (cart && cart.territory_id ? terrById(cart.territory_id) : null);
-    const gInstances = instances.filter(i => g.shift_ids.includes(i.shift_id));
-    const opening = gInstances.filter(i => i.type === 'opening');
-    const closing = gInstances.filter(i => i.type === 'closing');
-    const shifts = data.shifts.filter(s => g.shift_ids.includes(s.id)).map(shiftOut);
+  let spots = activeCarts();
+  if (terrFilter) spots = spots.filter(l => terrFilter.has(l.id));
+
+  const rowFor = (spotId, spotName, terrName, catName, shifts) => {
+    const shiftIds = shifts.map(s => s.id);
+    const inst = instances.filter(i => (spotId ? i.cart_id === spotId : shiftIds.includes(i.shift_id)));
+    const dailyHere = daily.filter(r => r.location_id === spotId);
+    const opening = inst.filter(i => i.type === 'opening');
+    const closing = inst.filter(i => i.type === 'closing');
     const openDone = opening.find(i => i.status === 'complete');
     const closeDone = closing.find(i => i.status === 'complete');
-    let state = 'scheduled';
-    if (closeDone) state = 'closed';
-    else if (opening.some(i => i.status === 'overdue') || closing.some(i => i.status === 'overdue')) state = 'overdue';
+    const overdue = inst.some(i => i.status === 'overdue') || dailyHere.some(r => r.status === 'missed');
+    const pending = inst.filter(i => i.status === 'pending').length + dailyHere.filter(r => r.status === 'pending').length;
+    let state;
+    if (!shifts.length && !dailyHere.length) state = 'no_shift';
+    else if (closeDone) state = 'closed';
+    else if (overdue) state = 'overdue';
     else if (openDone) state = 'open';
-    else if (opening.length) state = 'not_opened';
-    board.push({
-      cart_id: g.cart_id,
-      cart_name: cart ? cart.name : (!g.cart_id && terr) ? '🗺️ ' + terr.name + ' — spot in checklist' : '❓ No location or territory matched',
-      category_name: cart && cart.category_id ? (catById(cart.category_id) || {}).name : '',
-      territory_name: terr ? terr.name : '',
+    else if (opening.length || dailyHere.length) state = 'not_opened';
+    else state = 'scheduled';
+    const done = inst.filter(i => i.status === 'complete').length + dailyHere.filter(r => r.status === 'complete').length;
+    const total = inst.length + dailyHere.length;
+    return {
+      cart_id: spotId, cart_name: spotName, territory_name: terrName || '', category_name: catName || '',
       state,
       opened_at: openDone ? openDone.completed_at : null,
       opened_by: openDone ? openDone.user_name : null,
       closed_at: closeDone ? closeDone.completed_at : null,
       closed_by: closeDone ? closeDone.user_name : null,
-      workers: [...new Set(shifts.map(s => s.user_name))],
-    });
+      workers: [...new Set(shifts.map(s => (userById(s.user_id) || {}).name).filter(Boolean))],
+      done, total, pending,
+      flags: inst.reduce((a, i) => a + (i.flags || 0), 0) + dailyHere.reduce((a, r) => a + (r.flags || 0), 0),
+      photo_count: inst.filter(i => i.submission_id).reduce((a, i) => {
+        const sub = data.submissions.find(s => s.id === i.submission_id);
+        return a + (sub ? sub.responses.filter(r => r.photo).length : 0);
+      }, 0),
+    };
+  };
+  for (const sp of spots) {
+    board.push(rowFor(sp.id, sp.name, sp.territory_id ? (terrById(sp.territory_id) || {}).name : '',
+      sp.category_id ? (catById(sp.category_id) || {}).name : '',
+      dayShifts.filter(s => s.cart_id === sp.id)));
   }
-  board.sort((a, b) => String(a.territory_name).localeCompare(String(b.territory_name)) || String(a.cart_name).localeCompare(String(b.cart_name)));
+  const orphanShifts = dayShifts.filter(s => !s.cart_id);
+  if (orphanShifts.length) {
+    const byTerr = new Map();
+    orphanShifts.forEach(s => {
+      const k = s.territory_id || 0;
+      if (!byTerr.has(k)) byTerr.set(k, []);
+      byTerr.get(k).push(s);
+    });
+    for (const [tid, shifts] of byTerr) {
+      const tName = tid ? (terrById(tid) || {}).name : '';
+      board.push(rowFor(null, tid ? `🗺️ ${tName} — spot not set` : '❓ Unmatched shifts', tName, '', shifts));
+    }
+  }
+  const ORDER = { overdue: 0, not_opened: 1, open: 2, scheduled: 3, closed: 4, no_shift: 5 };
+  board.sort((a, b) => (ORDER[a.state] - ORDER[b.state]) ||
+    String(a.territory_name).localeCompare(String(b.territory_name)) ||
+    String(a.cart_name).localeCompare(String(b.cart_name)));
 
   const all = [...daily, ...instances.map(i => ({ status: i.status === 'overdue' ? 'missed' : i.status, flags: i.flags }))];
   const done = all.filter(r => r.status === 'complete').length;
@@ -1174,6 +1335,64 @@ on('GET', '/api/dashboard', (req, res) => {
       flagged: all.reduce((a, r) => a + (r.flags || 0), 0),
       pct: all.length ? Math.round(100 * done / all.length) : 0,
     },
+  });
+}, { level: 'manager' });
+
+on('GET', '/api/spots/:id/day', (req, res) => {
+  engine.generateInstances(); engine.markOverdue();
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : businessDate();
+  const spotId = req.params.id === 'none' ? null : Number(req.params.id);
+  const spot = spotId ? cartById(spotId) : null;
+  if (spotId && !spot) return send(res, 404, { error: 'Spot not found' });
+  const terrId = Number(req.query.territory_id) || null;
+
+  let shifts = data.shifts.filter(s => s.date === date &&
+    (spotId ? s.cart_id === spotId : (!s.cart_id && (!terrId || s.territory_id === terrId))));
+  const shiftIds = shifts.map(s => s.id);
+  const insts = data.instances.filter(i => i.date === date &&
+    (spotId ? i.cart_id === spotId : shiftIds.includes(i.shift_id)));
+
+  const photos = [];
+  const detail = insts.map(i => {
+    const out = instanceOut(i);
+    const sub = i.submission_id ? data.submissions.find(s => s.id === i.submission_id) : null;
+    if (sub) {
+      const c = data.checklists.find(x => x.id === sub.checklist_id);
+      sub.responses.filter(r => r.photo).forEach(r => {
+        const it = c ? c.items.find(x => x.id === r.item_id) : null;
+        photos.push({ photo: r.photo, label: it ? it.label : 'Photo', by: out.user_name, at: sub.completed_at, submission_id: sub.id });
+      });
+      out.answers = sub.responses.filter(r => !r.skipped).map(r => {
+        const it = c ? c.items.find(x => x.id === r.item_id) : null;
+        return { label: it ? it.label : '?', type: it ? it.type : '', unit: it ? it.unit : null, value: r.value, photo: r.photo, flagged: r.flagged };
+      });
+    }
+    return out;
+  });
+
+  // daily (non-shift) checklists tied to this spot
+  const dailyHere = spotId ? dailyRows(date, new Set([spotId])).filter(r => r.location_id === spotId) : [];
+  dailyHere.forEach(r => {
+    if (r.submission) {
+      const sub = data.submissions.find(s => s.id === r.submission.id);
+      const c = data.checklists.find(x => x.id === r.checklist_id);
+      if (sub) sub.responses.filter(x => x.photo).forEach(x => {
+        const it = c ? c.items.find(y => y.id === x.item_id) : null;
+        photos.push({ photo: x.photo, label: it ? it.label : 'Photo', by: r.submission.user_name, at: sub.completed_at, submission_id: sub.id });
+      });
+    }
+  });
+
+  const flavors = spot ? (spot.flavor_ids || []).map(id => (data.flavors || []).find(f => f.id === id)).filter(Boolean) : [];
+  send(res, 200, {
+    date,
+    spot_id: spotId, spot_name: spot ? spot.name : 'Unmatched shifts',
+    territory_name: spot && spot.territory_id ? ((terrById(spot.territory_id) || {}).name || null) : null,
+    shifts: shifts.map(s => {
+      const tc = data.timecards.find(t => t.shift_id === s.id);
+      return { ...shiftOut(s), clock_in_at: tc ? tc.clock_in_at : null, clock_out_at: tc ? tc.clock_out_at : null };
+    }),
+    instances: detail, daily: dailyHere, photos, flavors,
   });
 }, { level: 'manager' });
 
@@ -1423,10 +1642,68 @@ on('GET', '/api/reports', (req, res) => {
   }
   const checklists = [...byChecklist.values()].map(c => ({ ...c, pct: c.expected ? Math.round(100 * c.complete / c.expected) : 0 }))
     .sort((a, b) => a.name.localeCompare(b.name));
-  const people = [...byUser.values()].sort((a, b) => b.complete - a.complete);
+
+  // per-person completion rate (from assigned instances) so we can show a real rate, not just counts
+  const perUser = new Map();
+  const touchUser = (uid, field) => {
+    if (!uid) return;
+    if (!perUser.has(uid)) perUser.set(uid, { user_id: uid, name: (userById(uid) || {}).name || '—', expected: 0, complete: 0, missed: 0, flags: 0 });
+    perUser.get(uid)[field]++;
+  };
+  eachDate(from, to, date => {
+    let insts = data.instances.filter(x => x.date === date);
+    if (terrFilter) insts = insts.filter(x => (x.cart_id && terrFilter.has(x.cart_id)) || x.territory_id === terrId);
+    if (clFilter) insts = insts.filter(x => x.checklist_id === clFilter);
+    for (const i of insts) {
+      touchUser(i.user_id, 'expected');
+      if (i.status === 'complete') touchUser(i.user_id, 'complete');
+      else if (i.status === 'overdue' || date < businessDate()) touchUser(i.user_id, 'missed');
+    }
+  });
+  for (const [uid, row] of byUser) {
+    if (!perUser.has(uid) && uid) perUser.set(uid, { user_id: uid, name: row.name, expected: 0, complete: 0, missed: 0, flags: 0 });
+    if (perUser.has(uid)) perUser.get(uid).flags = row.flags;
+  }
+  const people = [...perUser.values()].map(p => ({
+    ...p,
+    submissions: (byUser.get(p.user_id) || {}).complete || 0,
+    pct: p.expected ? Math.round(100 * p.complete / p.expected) : null,
+  })).sort((a, b) => (b.submissions - a.submissions) || a.name.localeCompare(b.name));
+
+  // per-territory rollup
+  const perTerr = new Map();
+  const touchTerr = (tid, field, n = 1) => {
+    const key = tid || 0;
+    if (!perTerr.has(key)) perTerr.set(key, { territory_id: tid || null, name: tid ? ((terrById(tid) || {}).name || '—') : 'No territory', expected: 0, complete: 0, missed: 0, flags: 0 });
+    perTerr.get(key)[field] += n;
+  };
+  eachDate(from, to, date => {
+    for (const r of dailyRows(date, terrFilter)) {
+      if (clFilter && r.checklist_id !== clFilter) continue;
+      const cart = r.location_id ? cartById(r.location_id) : null;
+      const tid = cart ? cart.territory_id : null;
+      touchTerr(tid, 'expected');
+      if (r.status === 'complete') touchTerr(tid, 'complete');
+      if (r.status === 'missed') touchTerr(tid, 'missed');
+      if (r.flags) touchTerr(tid, 'flags', r.flags);
+    }
+    let insts = data.instances.filter(x => x.date === date);
+    if (terrFilter) insts = insts.filter(x => (x.cart_id && terrFilter.has(x.cart_id)) || x.territory_id === terrId);
+    if (clFilter) insts = insts.filter(x => x.checklist_id === clFilter);
+    for (const i of insts.map(instanceOut)) {
+      const cart = i.cart_id ? cartById(i.cart_id) : null;
+      const tid = (cart && cart.territory_id) || i.territory_id || null;
+      touchTerr(tid, 'expected');
+      if (i.status === 'complete') touchTerr(tid, 'complete');
+      else if (i.status === 'overdue' || date < businessDate()) touchTerr(tid, 'missed');
+      if (i.flags) touchTerr(tid, 'flags', i.flags);
+    }
+  });
+  const territories = [...perTerr.values()].map(t => ({ ...t, pct: t.expected ? Math.round(100 * t.complete / t.expected) : 0 }))
+    .sort((a, b) => a.name.localeCompare(b.name));
   const totals = checklists.reduce((t, c) => ({ expected: t.expected + c.expected, complete: t.complete + c.complete, missed: t.missed + c.missed, flags: t.flags + c.flags }), { expected: 0, complete: 0, missed: 0, flags: 0 });
   send(res, 200, {
-    from, to, checklists, people,
+    from, to, checklists, people, territories,
     flagged: flagged.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 100),
     totals: { ...totals, pct: totals.expected ? Math.round(100 * totals.complete / totals.expected) : 0 },
     submission_count: subs.length,

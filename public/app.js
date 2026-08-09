@@ -137,8 +137,8 @@ async function openNotifications() {
 
 // ---------- shell ----------
 function tabsFor() {
-  if (rank(ME) === 2) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'carts|📍 Locations', 'users|👥 Team', 'chat|💬 Chat', 'opps|✨ Opportunities', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
-  if (rank(ME) === 1) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'users|👥 Team', 'chat|💬 Chat', 'opps|✨ Opportunities', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
+  if (rank(ME) === 2) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'carts|📍 Spots', 'flavors|🍦 Flavors', 'users|👥 Team', 'chat|💬 Chat', 'opps|✨ Opportunities', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
+  if (rank(ME) === 1) return ['dashboard|📊 Dashboard', 'reports|📈 Reports', 'schedule|🗓️ Schedule', 'checklists|📋 Checklists', 'flavors|🍦 Flavors', 'users|👥 Team', 'chat|💬 Chat', 'opps|✨ Opportunities', 'mytasks|✅ My tasks', 'myschedule|🙋 My shifts'];
   return ['home|🍭 My checklists', 'myschedule|🗓️ My shifts', 'chat|💬 Chat', 'opps|✨ Opportunities'];
 }
 function shell() {
@@ -195,7 +195,7 @@ function shell() {
   document.querySelectorAll('.drawer-item[data-tab]').forEach(b => b.onclick = () => { TAB = b.dataset.tab; shell(); });
   refreshBell();
   const body = document.getElementById('body');
-  const views = { dashboard: renderDashboard, reports: renderReports, schedule: renderSchedule, checklists: renderChecklistAdmin, carts: renderCarts, users: renderUsers, chat: renderChat, opps: renderOpportunities, mytasks: renderMyTasks, home: renderMyTasks, myschedule: renderMySchedule };
+  const views = { dashboard: renderDashboard, reports: renderReports, schedule: renderSchedule, checklists: renderChecklistAdmin, carts: renderCarts, flavors: renderFlavors, users: renderUsers, chat: renderChat, opps: renderOpportunities, mytasks: renderMyTasks, home: renderMyTasks, myschedule: renderMySchedule };
   views[TAB](body);
 }
 
@@ -240,6 +240,61 @@ function renderLogin() {
   };
 }
 
+function flavorCard(plan) {
+  if (!plan || !plan.flavors || !plan.flavors.length) return '';
+  return `<div class="card ann-card" style="border-left-color:var(--pink)">
+    <div class="ann-head"><b>🍦 Flavors to pack — ${esc(plan.spot_name || '')}</b>
+      <span style="color:var(--ink-soft);font-size:12px;font-weight:700">${plan.flavors.length} flavors</span></div>
+    <div class="flavor-list">
+      ${plan.flavors.map(f => `<span class="flavor-chip ${f.in_stock ? '' : 'out'}">${f.emoji || '🍦'} ${esc(f.name)}${f.in_stock ? '' : ' (out of stock)'}</span>`).join('')}
+    </div>
+    ${plan.flavors.some(f => f.note) ? `<div class="ann-body" style="font-size:13px">${plan.flavors.filter(f => f.note).map(f => `<b>${esc(f.name)}:</b> ${esc(f.note)}`).join('<br>')}</div>` : ''}
+  </div>`;
+}
+async function addChecklistModal(refresh) {
+  const [avail, spots] = await Promise.all([api('/api/checklists/available'), api('/api/locations')]);
+  if (!avail.length) return toast('No checklists are available for your role', true);
+  const bg = modal(`
+    <h2>➕ Add a checklist</h2>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 8px">Didn't get a checklist that you need? Add it here — it'll be due within the hour.</p>
+    <label>Checklist</label>
+    <select id="acCl">${avail.map(c => `<option value="${c.id}">${c.emoji || '📋'} ${esc(c.name)}${c.job_role ? ' · ' + esc(c.job_role) : ''}</option>`).join('')}</select>
+    <label>Spot (optional)</label>
+    <select id="acSpot"><option value="">— none —</option>${spots.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+    <button class="btn teal" id="acGo" style="width:100%;margin-top:14px">Add to my day</button>
+  `);
+  bg.querySelector('#acGo').onclick = async () => {
+    try {
+      await api('/api/instances/self', { method: 'POST', json: {
+        checklist_id: Number(bg.querySelector('#acCl').value),
+        cart_id: Number(bg.querySelector('#acSpot').value) || null } });
+      bg.remove(); toast('Added to your list 📋'); refresh();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+async function assignChecklistModal(refresh) {
+  const [avail, users, spots] = await Promise.all([api('/api/checklists/available'), api('/api/users'), api('/api/locations')]);
+  const bg = modal(`
+    <h2>📋 Assign a checklist</h2>
+    <label>Teammate</label>
+    <select id="asUser">${users.map(u => `<option value="${u.id}">${esc(u.name)}${u.job_role ? ' · ' + esc(u.job_role) : ''}</option>`).join('')}</select>
+    <label>Checklist</label>
+    <select id="asCl">${avail.map(c => `<option value="${c.id}">${c.emoji || '📋'} ${esc(c.name)}</option>`).join('')}</select>
+    <label>Spot (optional)</label>
+    <select id="asSpot"><option value="">— none —</option>${spots.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+    <button class="btn teal" id="asGo" style="width:100%;margin-top:14px">Assign</button>
+  `);
+  bg.querySelector('#asGo').onclick = async () => {
+    try {
+      await api('/api/instances/assign', { method: 'POST', json: {
+        checklist_id: Number(bg.querySelector('#asCl').value),
+        user_id: Number(bg.querySelector('#asUser').value),
+        cart_id: Number(bg.querySelector('#asSpot').value) || null } });
+      bg.remove(); toast('Assigned — they were notified 📋'); refresh();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
 // ================= SHIFT DETAIL =================
 async function openShiftDetail(shiftId, refresh) {
   let s;
@@ -261,13 +316,19 @@ async function openShiftDetail(shiftId, refresh) {
     <p style="color:var(--ink-soft);margin:0 0 10px">${prettyDate(s.date)} · ${fmtTime(s.start_at)} – ${fmtTime(s.end_at)}
       ${s.territory_name ? ' · 🗺️ ' + esc(s.territory_name) : ''}</p>
     ${canManage ? `
-      <label>📍 Location${s.cart_name ? '' : ' <span style="color:var(--red)">(not set — assign one)</span>'}</label>
+      <label>📍 Spot${s.cart_name ? '' : ' <span style="color:var(--red)">(not set — assign one)</span>'}</label>
       <div class="row">
         <div style="flex:3"><select id="sdCart"><option value="">— none —</option>
           ${carts.map(c => `<option value="${c.id}" ${s.cart_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
         <div style="flex:0 0 auto"><button class="btn small" id="sdSaveCart">Save</button></div>
-      </div>`
-      : `<p><b>📍 ${s.cart_name ? esc(s.cart_name) : 'Location: see your checklist'}</b></p>`}
+      </div>
+      ${(s.keyword_suggestions || []).length ? `
+        <div style="background:var(--cream);border-radius:12px;padding:10px 12px;margin-top:8px">
+          <div style="font-size:13px;font-weight:800;color:var(--ink-soft);margin-bottom:6px">🧠 Remember this shift note for the spot above (auto-matches future shifts):</div>
+          <select id="sdLearn" style="margin-bottom:0"><option value="">— don't remember anything —</option>
+            ${s.keyword_suggestions.map(k => `<option value="${esc(k)}">“${esc(k)}”</option>`).join('')}</select>
+        </div>` : ''}`
+      : `<p><b>📍 ${s.cart_name ? esc(s.cart_name) : 'Spot: see your checklist'}</b></p>`}
     <label>📌 Shift notes & files</label>
     <div class="card" style="max-height:260px;overflow-y:auto">${feed || '<div class="empty" style="padding:12px">Nothing added yet.</div>'}</div>
     <div class="row" style="margin-top:10px">
@@ -303,8 +364,12 @@ async function openShiftDetail(shiftId, refresh) {
   };
   if (canManage) bg.querySelector('#sdSaveCart').onclick = async () => {
     try {
-      await api('/api/shifts/' + s.id, { method: 'PUT', json: { cart_id: Number(bg.querySelector('#sdCart').value) || null } });
-      bg.remove(); toast('Location saved — pending checklists updated 📍');
+      const learnEl = bg.querySelector('#sdLearn');
+      const payload = { cart_id: Number(bg.querySelector('#sdCart').value) || null };
+      if (learnEl && learnEl.value) payload.learn_keyword = learnEl.value;
+      await api('/api/shifts/' + s.id, { method: 'PUT', json: payload });
+      bg.remove();
+      toast(payload.learn_keyword ? 'Saved — I\'ll match that note to this spot from now on 🧠' : 'Spot saved — pending checklists updated 📍');
       refresh();
     } catch (e) { toast(e.message, true); }
   };
@@ -411,7 +476,7 @@ async function doClockIn(refresh, details) {
       const bg = modal(`
         <h2>⏱️ Clock in</h2>
         <p style="color:var(--ink-soft);font-size:14px;margin:0 0 8px">No scheduled shift found right now — tell us where you're working and until when.</p>
-        <label>Location</label>
+        <label>Spot</label>
         <select id="ciCart">${carts.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
         <label>Shift ends at</label>
         <input type="datetime-local" id="ciEnd" value="${localDT(6 * 60)}">
@@ -444,19 +509,24 @@ function bindClock(body, refresh) {
 async function renderMyTasks(body) {
   const [{ date, checklists, instances, shift }, clock, anns] = await Promise.all([
     api('/api/today'), api('/api/clock'), api('/api/announcements').catch(() => [])]);
+  const spotForFlavors = (clock.shift && clock.shift.cart_id) || (shift && shift.cart_id) || null;
+  const flavorPlan = spotForFlavors ? await api('/api/flavors/plan?spot_id=' + spotForFlavors).catch(() => null) : null;
   const all = [...instances, ...checklists];
   const done = instances.filter(i => i.status === 'complete').length + checklists.filter(c => c.submission).length;
   body.innerHTML = `
     <div class="section-head"><h2>${prettyDate(date)}</h2><div class="spacer"></div>
+      <button class="btn ghost small" id="addClBtn">➕ Add a checklist</button>
       <button class="btn ghost small" id="pickupBtn">⚡ Pick up a shift</button>
       <span class="pill ${done === all.length && all.length ? 'green' : 'teal'}">${done}/${all.length} complete</span></div>
     ${clockCard(clock)}
+    ${flavorCard(flavorPlan)}
     ${anns.slice(0, 2).map(an => annCard(an, false)).join('')}
     ${taskCards(instances, checklists) || `<div class="empty"><div class="big">🏖️</div>Nothing assigned right now. Clock in or wait for your shift — your opening checklist appears automatically.</div>`}
   `;
   bindTaskCards(body, instances, checklists, () => renderMyTasks(body));
   bindClock(body, () => renderMyTasks(body));
   body.querySelector('#pickupBtn').onclick = () => pickupShift(() => renderMyTasks(body));
+  body.querySelector('#addClBtn').onclick = () => addChecklistModal(() => renderMyTasks(body));
 }
 
 // ================= MY SHIFTS =================
@@ -469,7 +539,7 @@ async function renderMySchedule(body) {
     ${byDay[d].map(s => `
       <div class="mrow chat-row" data-shift="${s.id}">
         <div style="font-size:22px">${s.source === 'square' ? '⬛' : s.source === 'pickup' ? '⚡' : '✍️'}</div>
-        <div class="info"><b>${s.cart_name ? esc(s.cart_name) : s.territory_name ? '🗺️ ' + esc(s.territory_name) : 'Location TBD'}${s.note_count ? ` <span class="pill teal">📌 ${s.note_count}</span>` : ''}</b>
+        <div class="info"><b>${s.cart_name ? esc(s.cart_name) : s.territory_name ? '🗺️ ' + esc(s.territory_name) : 'Spot TBD'}${s.note_count ? ` <span class="pill teal">📌 ${s.note_count}</span>` : ''}</b>
           <span>${fmtTime(s.start_at)} – ${fmtTime(s.end_at)}${s.notes && s.source === 'square' ? ' · “' + esc(s.notes) + '”' : ''}</span></div>
       </div>`).join('')}`).join('');
 
@@ -482,7 +552,7 @@ async function renderMySchedule(body) {
     else action = `<button class="btn teal small" data-req="${o.id}">Request 🙋</button>`;
     return `<div class="mrow">
       <div style="font-size:22px">✨</div>
-      <div class="info"><b>${o.cart_name ? esc(o.cart_name) : o.territory_name ? '🗺️ ' + esc(o.territory_name) : 'Location TBD'}</b>
+      <div class="info"><b>${o.cart_name ? esc(o.cart_name) : o.territory_name ? '🗺️ ' + esc(o.territory_name) : 'Spot TBD'}</b>
         <span>${when}${o.request_count ? ` · ${o.request_count} request${o.request_count > 1 ? 's' : ''}` : ''}</span></div>
       ${action}
     </div>`;
@@ -512,8 +582,8 @@ async function pickupShift(refresh) {
   const carts = await api('/api/locations');
   const bg = modal(`
     <h2>⚡ Pick up a shift</h2>
-    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 8px">Working a shift that isn't assigned to you in the schedule? Pick your location and when your shift ends — your opening checklist appears right away, and the closing checklist 30 minutes before the end.</p>
-    <label>Location</label>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 8px">Working a shift that isn't assigned to you in the schedule? Pick your spot and when your shift ends — your opening checklist appears right away, and the closing checklist 30 minutes before the end.</p>
+    <label>Spot</label>
     <select id="puCart">${carts.map(c => `<option value="${c.id}">${esc(c.name)}${c.category_name ? ' · ' + esc(c.category_name) : ''}</option>`).join('')}</select>
     <label>Shift ends at</label>
     <input type="datetime-local" id="puEnd" value="${localDT(6 * 60)}">
@@ -653,19 +723,25 @@ async function renderDashboard(body) {
   const s = dash.summary;
 
   const stateInfo = {
-    open: '🟢 Open', closed: '⚫ Closed', overdue: '🔴 Overdue',
-    not_opened: '🟡 Not opened yet', scheduled: '🕒 Shift scheduled',
+    open: ['🟢', 'Open', 'green'], closed: ['⚫', 'Closed', 'gray'], overdue: ['🔴', 'Needs attention', 'red'],
+    not_opened: ['🟡', 'Not opened yet', 'yellow'], scheduled: ['🕒', 'Shift scheduled', 'teal'], no_shift: ['⚪', 'No shift today', 'gray'],
   };
-  const tiles = dash.board.map(b => {
-    const lines = [];
-    if (b.opened_at) lines.push(`Opened ${fmtTime(b.opened_at)} by ${esc(b.opened_by)}`);
-    if (b.closed_at) lines.push(`Closed ${fmtTime(b.closed_at)} by ${esc(b.closed_by)}`);
-    if (!lines.length && b.workers.length) lines.push('Scheduled: ' + b.workers.map(esc).join(', '));
-    return `<div class="cart-tile s-${b.state}">
-      <div class="cat">${esc([b.territory_name, b.category_name].filter(Boolean).join(' · '))}</div>
-      <h4>${esc(b.cart_name)}</h4>
-      <div><b style="font-size:13px">${stateInfo[b.state] || '?'}</b></div>
-      <div class="who">${lines.join('<br>')}</div>
+  const spotRows = dash.board.map(b => {
+    const [icon, label, pill] = stateInfo[b.state] || ['❓', '?', 'gray'];
+    const bits = [];
+    if (b.workers.length) bits.push('🧍 ' + b.workers.map(esc).join(', '));
+    if (b.opened_at) bits.push('opened ' + fmtTime(b.opened_at));
+    if (b.closed_at) bits.push('closed ' + fmtTime(b.closed_at));
+    if (b.photo_count) bits.push('📷 ' + b.photo_count);
+    if (b.flags) bits.push('⚑ ' + b.flags);
+    return `<div class="mrow chat-row spot-row" data-spot="${b.cart_id ?? 'none'}">
+      <div style="font-size:20px">${icon}</div>
+      <div class="info"><b>${esc(b.cart_name)}</b>
+        <span>${b.territory_name ? esc(b.territory_name) + ' · ' : ''}${bits.join(' · ') || 'nothing yet today'}</span></div>
+      <div style="text-align:right;flex-shrink:0">
+        <span class="pill ${pill}">${label}</span>
+        ${b.total ? `<div style="font-size:12px;color:var(--ink-soft);font-weight:800;margin-top:4px">${b.done}/${b.total} done</div>` : ''}
+      </div>
     </div>`;
   }).join('');
 
@@ -706,6 +782,7 @@ async function renderDashboard(body) {
       <button class="btn ghost small" id="nextDay">▶</button>
       <h2>${prettyDate(dash.date)}</h2>
       <div class="spacer"></div>
+      <button class="btn ghost small" id="assignClBtn">📋 Assign checklist</button>
       <select id="terrSel" style="width:auto">
         <option value="">🗺️ All territories</option>
         ${terrs.map(t => `<option value="${t.id}" ${DASH_TERR == t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
@@ -719,15 +796,9 @@ async function renderDashboard(body) {
     </div>
     <div class="section-head" style="margin-top:4px"><div class="subhead" style="margin:0">📣 Announcements</div><div class="spacer"></div>
       <button class="btn small" id="newAnn">+ Post</button></div>
-    ${anns.length ? anns.slice(0, 5).map(an => annCard(an, true)).join('') : '<div class="empty" style="padding:14px">Nothing posted yet — share weekly updates here.</div>'}
-    <div class="subhead">📍 Location status</div>
-    ${tiles ? `<div class="board">${tiles}</div>` : '<div class="empty">No shifts scheduled this day — locations appear here once shifts exist.</div>'}
-    <div class="subhead">☀️🌙 Shift checklists</div>
-    ${instRows ? `<table class="grid"><tr><th>Checklist</th><th>Cart</th><th>Who</th><th>Window</th><th>Status</th></tr>${instRows}</table>`
-      : '<div class="empty">No shift checklists populated this day.</div>'}
-    <div class="subhead">📋 Daily checklists</div>
-    ${rows ? `<table class="grid"><tr><th>Checklist</th><th>Location</th><th>Due</th><th>Completed by</th><th>Status</th></tr>${rows}</table>`
-      : '<div class="empty">No daily checklists scheduled this day.</div>'}
+    ${anns.length ? anns.slice(0, 3).map(an => annCard(an, true)).join('') : '<div class="empty" style="padding:14px">Nothing posted yet — share weekly updates here.</div>'}
+    <div class="subhead">📍 Spots — tap for the day's details</div>
+    ${spotRows || '<div class="empty">No spots yet — add them in the Spots menu.</div>'}
     <div class="card" style="margin-top:20px"><b style="font-size:13px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:1px">Last 7 days</b>
       <div class="trend">${bars}</div></div>
   `;
@@ -737,9 +808,56 @@ async function renderDashboard(body) {
   body.querySelector('#nextDay').onclick = () => shiftDay(DASH_DATE, 1, setDate);
   body.querySelector('#terrSel').onchange = e => { DASH_TERR = e.target.value; renderDashboard(body); };
   body.querySelector('#newAnn').onclick = () => postAnnouncement(() => renderDashboard(body));
+  body.querySelector('#assignClBtn').onclick = () => assignChecklistModal(() => renderDashboard(body));
   bindAnnouncements(body, () => renderDashboard(body));
-  body.querySelectorAll('tr.clickable').forEach(tr => tr.onclick = () => tr.dataset.sub && openSubmission(tr.dataset.sub));
+  body.querySelectorAll('.spot-row').forEach(row => row.onclick = () => openSpotDay(row.dataset.spot, dash.date));
 }
+
+// ---- spot day detail ----
+async function openSpotDay(spotId, date) {
+  const q = new URLSearchParams({ date });
+  if (DASH_TERR) q.set('territory_id', DASH_TERR);
+  let d;
+  try { d = await api(`/api/spots/${spotId}/day?${q}`); } catch (e) { return toast(e.message, true); }
+
+  const shiftRows = d.shifts.map(s => `
+    <div class="notif-row"><b>🧍 ${esc(s.user_name)}</b>
+      <span>${fmtTime(s.start_at)} – ${fmtTime(s.end_at)}${s.clock_in_at ? ` · ⏱️ clocked in ${fmtTime(s.clock_in_at)}` : ''}${s.clock_out_at ? ` → out ${fmtTime(s.clock_out_at)}` : ''}${s.note_count ? ` · 📌 ${s.note_count}` : ''}</span></div>`).join('')
+    || '<div class="empty" style="padding:12px">No shifts scheduled here today.</div>';
+
+  const pill = st => st === 'complete' ? '<span class="pill green">✓ Done</span>'
+    : st === 'overdue' || st === 'missed' ? '<span class="pill red">Overdue</span>' : '<span class="pill yellow">Pending</span>';
+  const clRows = [
+    ...d.instances.map(i => ({ id: i.submission_id, emoji: i.emoji, name: i.checklist_name, who: i.user_name, status: i.status, at: i.completed_at, flags: i.flags, answers: i.answers })),
+    ...d.daily.map(r => ({ id: r.submission ? r.submission.id : null, emoji: r.emoji, name: r.checklist_name, who: r.submission ? r.submission.user_name : '—', status: r.status, at: r.submission ? r.submission.completed_at : null, flags: r.flags })),
+  ].map(c => `
+    <div class="mrow ${c.id ? 'chat-row' : ''}" ${c.id ? `data-sub="${c.id}"` : ''}>
+      <div style="font-size:20px">${c.emoji || '📋'}</div>
+      <div class="info"><b>${esc(c.name)}</b>
+        <span>${esc(c.who || '—')}${c.at ? ' · ' + fmtTime(c.at) : ''}${c.flags ? ' · ⚑ ' + c.flags : ''}${c.id ? ' · tap to see answers' : ''}</span></div>
+      ${pill(c.status)}
+    </div>`).join('') || '<div class="empty" style="padding:12px">No checklists for this spot today.</div>';
+
+  const photoGrid = d.photos.length ? `<div class="photo-grid">
+    ${d.photos.map(p => `<a href="/api/photos/${p.photo}" target="_blank" class="photo-cell">
+      <img src="/api/photos/${p.photo}" alt="${esc(p.label)}">
+      <span>${esc(p.label)}<br><b>${esc(p.by)} · ${fmtTime(p.at)}</b></span></a>`).join('')}
+  </div>` : '<div class="empty" style="padding:12px">No photos submitted yet today.</div>';
+
+  const bg = modal(`
+    <h2>📍 ${esc(d.spot_name)}</h2>
+    <p style="color:var(--ink-soft);margin:0 0 12px">${d.territory_name ? esc(d.territory_name) + ' · ' : ''}${prettyDate(d.date)}</p>
+    ${d.flavors && d.flavors.length ? `<div class="flavor-list" style="margin-bottom:12px">${d.flavors.map(f => `<span class="flavor-chip ${f.in_stock ? '' : 'out'}">${f.emoji || '🍦'} ${esc(f.name)}</span>`).join('')}</div>` : ''}
+    <div class="subhead" style="margin-top:0">🧍 Working today</div>
+    <div class="card">${shiftRows}</div>
+    <div class="subhead">📋 Checklists</div>
+    ${clRows}
+    <div class="subhead">📷 Setup photos</div>
+    ${photoGrid}
+  `);
+  bg.querySelectorAll('[data-sub]').forEach(r => r.onclick = () => openSubmission(r.dataset.sub));
+}
+
 function shiftDay(from, n, cb) {
   const d = new Date(from + 'T12:00:00'); d.setDate(d.getDate() + n);
   cb(d.toISOString().slice(0, 10));
@@ -926,10 +1044,19 @@ async function renderOpportunities(body) {
 }
 
 // ================= REPORTS =================
-let REP_FROM = null, REP_TO = null, REP_CL = '', REP_TERR = '';
+let REP_FROM = null, REP_TO = null, REP_CL = '', REP_TERR = '', REP_PRESET = 'week', REP_VIEW = 'all';
+function presetRange(p) {
+  const now = new Date();
+  const iso = d => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10); };
+  if (p === 'today') return [iso(now), iso(now)];
+  if (p === 'week') { const s = new Date(now); s.setDate(s.getDate() - s.getDay()); return [iso(s), iso(now)]; }
+  if (p === 'month') { const s = new Date(now.getFullYear(), now.getMonth(), 1); return [iso(s), iso(now)]; }
+  return [REP_FROM, REP_TO];
+}
 async function renderReports(body) {
-  if (!REP_TO) { REP_TO = new Date().toISOString().slice(0, 10); }
-  if (!REP_FROM) { REP_FROM = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10); }
+  if (REP_PRESET !== 'custom') { const [f, t] = presetRange(REP_PRESET); REP_FROM = f; REP_TO = t; }
+  if (!REP_TO) REP_TO = new Date().toISOString().slice(0, 10);
+  if (!REP_FROM) REP_FROM = REP_TO;
   const params = new URLSearchParams({ from: REP_FROM, to: REP_TO });
   if (REP_CL) params.set('checklist_id', REP_CL);
   if (REP_TERR) params.set('territory_id', REP_TERR);
@@ -945,8 +1072,16 @@ async function renderReports(body) {
       <td>${c.flags ? `<span class="pill red">⚑ ${c.flags}</span>` : '—'}</td></tr>`).join('');
 
   const peopleRows = rep.people.map(p => `
-    <tr><td><b>${esc(p.name)}</b></td><td>${p.complete}</td>
+    <tr><td><b>${esc(p.name)}</b></td>
+      <td>${p.expected ? `${p.complete}/${p.expected}` : p.submissions}</td>
+      <td>${p.pct == null ? '—' : `<span class="pill ${p.pct >= 90 ? 'green' : p.pct >= 60 ? 'yellow' : 'red'}">${p.pct}%</span>`}</td>
+      <td>${p.missed || 0}</td>
       <td>${p.flags ? `<span class="pill red">⚑ ${p.flags}</span>` : '—'}</td></tr>`).join('');
+  const terrRows = (rep.territories || []).map(t => `
+    <tr><td><b>${esc(t.name)}</b></td><td>${t.complete}/${t.expected}</td>
+      <td><span class="pill ${t.pct >= 90 ? 'green' : t.pct >= 60 ? 'yellow' : 'red'}">${t.pct}%</span></td>
+      <td>${t.missed}</td>
+      <td>${t.flags ? `<span class="pill red">⚑ ${t.flags}</span>` : '—'}</td></tr>`).join('');
 
   const flaggedRows = rep.flagged.map(f => `
     <div class="mrow chat-row" data-sub="${f.submission_id}">
@@ -957,16 +1092,22 @@ async function renderReports(body) {
     </div>`).join('');
 
   body.innerHTML = `
-    <div class="datebar">
-      <h2 style="margin-right:6px">📈 Reports</h2>
+    <div class="section-head"><h2>📈 Reports</h2><div class="spacer"></div>
+      <a class="btn teal small" style="text-decoration:none" href="/api/reports/export.csv?${params}" download>⬇️ Export CSV</a></div>
+    <div class="chat-chips" style="margin-bottom:10px">
+      ${[['today', 'Today'], ['week', 'This week'], ['month', 'This month'], ['custom', 'Custom']].map(([k, l]) =>
+        `<button class="chip ${REP_PRESET === k ? 'active' : ''}" data-preset="${k}">${l}</button>`).join('')}
+    </div>
+    <div class="datebar" ${REP_PRESET === 'custom' ? '' : 'style="display:none"'}>
       <input type="date" id="repFrom" value="${REP_FROM}"> <span style="font-weight:800;color:var(--ink-soft)">→</span>
       <input type="date" id="repTo" value="${REP_TO}">
+    </div>
+    <div class="datebar">
       <select id="repCl" style="width:auto"><option value="">All checklists</option>
         ${lists.map(c => `<option value="${c.id}" ${REP_CL == c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <select id="repTerr" style="width:auto"><option value="">All territories</option>
         ${terrs.map(x => `<option value="${x.id}" ${REP_TERR == x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
-      <div class="spacer"></div>
-      <a class="btn teal small" style="text-decoration:none" href="/api/reports/export.csv?${params}" download>⬇️ Export CSV</a>
+      <span style="font-size:13px;font-weight:800;color:var(--ink-soft)">${prettyDate(REP_FROM)} → ${prettyDate(REP_TO)}</span>
     </div>
     <div class="stats">
       <div class="card stat c-teal"><div class="num">${t.pct}%</div><div class="lbl">Completion</div></div>
@@ -974,16 +1115,22 @@ async function renderReports(body) {
       <div class="card stat c-red"><div class="num">${t.missed}</div><div class="lbl">Missed</div></div>
       <div class="card stat c-orange"><div class="num">${t.flags}</div><div class="lbl">Flagged</div></div>
     </div>
-    <div class="subhead">📋 By checklist</div>
-    ${clRows ? `<table class="grid"><tr><th>Checklist</th><th>Done</th><th>Rate</th><th>Missed</th><th>Flags</th></tr>${clRows}</table>` : '<div class="empty">No activity in this range.</div>'}
-    <div class="subhead">🧑‍🍳 By person</div>
-    ${peopleRows ? `<table class="grid"><tr><th>Person</th><th>Checklists completed</th><th>Flags</th></tr>${peopleRows}</table>` : '<div class="empty">No submissions in this range.</div>'}
+    <div class="chat-chips" style="margin:14px 0 10px">
+      ${[['all', '📋 By checklist'], ['people', '🧑‍🍳 By team member'], ['terr', '🗺️ By territory']].map(([k, l]) =>
+        `<button class="chip ${REP_VIEW === k ? 'active' : ''}" data-view="${k}">${l}</button>`).join('')}
+    </div>
+    ${REP_VIEW === 'all' ? (clRows ? `<div class="table-wrap"><table class="grid"><tr><th>Checklist</th><th>Done</th><th>Rate</th><th>Missed</th><th>Flags</th></tr>${clRows}</table></div>` : '<div class="empty">No activity in this range.</div>') : ''}
+    ${REP_VIEW === 'people' ? (peopleRows ? `<div class="table-wrap"><table class="grid"><tr><th>Person</th><th>Done</th><th>Rate</th><th>Missed</th><th>Flags</th></tr>${peopleRows}</table></div>` : '<div class="empty">No activity in this range.</div>') : ''}
+    ${REP_VIEW === 'terr' ? (terrRows ? `<div class="table-wrap"><table class="grid"><tr><th>Territory</th><th>Done</th><th>Rate</th><th>Missed</th><th>Flags</th></tr>${terrRows}</table></div>` : '<div class="empty">No activity in this range.</div>') : ''}
     <div class="subhead">⚑ Flagged answers (tap for full checklist)</div>
     ${flaggedRows || '<div class="empty">Nothing flagged — clean range 🎉</div>'}
   `;
   const rerun = () => renderReports(body);
-  body.querySelector('#repFrom').onchange = e => { REP_FROM = e.target.value; rerun(); };
-  body.querySelector('#repTo').onchange = e => { REP_TO = e.target.value; rerun(); };
+  body.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => { REP_PRESET = b.dataset.preset; rerun(); });
+  body.querySelectorAll('[data-view]').forEach(b => b.onclick = () => { REP_VIEW = b.dataset.view; rerun(); });
+  const fromEl = body.querySelector('#repFrom'), toEl = body.querySelector('#repTo');
+  if (fromEl) fromEl.onchange = e => { REP_PRESET = 'custom'; REP_FROM = e.target.value; rerun(); };
+  if (toEl) toEl.onchange = e => { REP_PRESET = 'custom'; REP_TO = e.target.value; rerun(); };
   body.querySelector('#repCl').onchange = e => { REP_CL = e.target.value; rerun(); };
   body.querySelector('#repTerr').onchange = e => { REP_TERR = e.target.value; rerun(); };
   body.querySelectorAll('[data-sub]').forEach(r => r.onclick = () => openSubmission(r.dataset.sub));
@@ -1001,7 +1148,7 @@ async function renderSchedule(body) {
   const reqRows = requests.map(r => `
     <div class="mrow">
       <div style="font-size:22px">🙋</div>
-      <div class="info"><b>${esc(r.user_name)} → ${r.shift.cart_name ? esc(r.shift.cart_name) : 'Location TBD'}</b>
+      <div class="info"><b>${esc(r.user_name)} → ${r.shift.cart_name ? esc(r.shift.cart_name) : 'Spot TBD'}</b>
         <span>${prettyDate(r.shift.date)}, ${fmtTime(r.shift.start_at)} – ${fmtTime(r.shift.end_at)} · asked ${ago(r.created_at)}</span></div>
       <button class="btn teal small" data-approve="${r.id}">Approve ✓</button>
       <button class="btn ghost small" data-decline="${r.id}">Decline</button>
@@ -1010,7 +1157,7 @@ async function renderSchedule(body) {
   const rows = shifts.map(s => `
     <div class="mrow chat-row" data-shift="${s.id}">
       <div style="font-size:22px">${s.source === 'square' ? '⬛' : s.source === 'pickup' ? '⚡' : '✍️'}</div>
-      <div class="info"><b>${esc(s.user_name)} — ${s.cart_name ? esc(s.cart_name) : s.territory_name ? '🗺️ ' + esc(s.territory_name) : '<span style="color:var(--red)">❓ no location or territory</span>'}${s.note_count ? ` <span class="pill teal">📌 ${s.note_count}</span>` : ''}</b>
+      <div class="info"><b>${esc(s.user_name)} — ${s.cart_name ? esc(s.cart_name) : s.territory_name ? '🗺️ ' + esc(s.territory_name) : '<span style="color:var(--red)">❓ no spot or territory</span>'}${s.note_count ? ` <span class="pill teal">📌 ${s.note_count}</span>` : ''}</b>
         <span>${fmtTime(s.start_at)} – ${fmtTime(s.end_at)} · ${s.source === 'square' ? 'From Square' : s.source === 'pickup' ? 'Picked up in app' : 'Manual'}${s.notes && s.source === 'square' ? ' · “' + esc(s.notes) + '”' : ''} · tap for details</span></div>
       ${s.source !== 'square' ? `<button class="btn danger small" data-del="${s.id}">Remove</button>` : ''}
     </div>`).join('');
@@ -1020,7 +1167,7 @@ async function renderSchedule(body) {
       <h3>⬛ Square connection</h3>
       <p style="margin:4px 0 10px;font-size:14px;color:var(--ink-soft)">
         Shifts sync automatically every 10 minutes from Square Shifts.
-        <b>Put the location name in each shift's notes</b> so the right location gets matched. Team members match by email.</p>
+        <b>Put the spot name (or a learned keyword) in each shift's notes</b> so the right location gets matched. Team members match by email.</p>
       <div style="font-size:14px;margin-bottom:10px">
         Status: ${sq.connected ? `<span class="status-ok">Connected (${sq.token_preview})</span>` : '<span class="status-bad">Not connected</span>'}
         ${sq.last_sync ? ` · Last sync ${ago(sq.last_sync)}` : ''}
@@ -1040,6 +1187,7 @@ async function renderSchedule(body) {
         <div style="flex:0 0 auto"><a class="btn ghost small" href="/api/backup" download style="text-decoration:none;display:inline-block">⬇️ Download backup</a></div>
         <div style="flex:0 0 auto"><button class="btn ghost small" id="restoreBtn">⬆️ Restore backup</button>
           <input type="file" id="restoreFile" accept=".json" hidden></div>
+        <div style="flex:0 0 auto"><button class="btn danger small" id="resetHist">🧹 Clear checklist history</button></div>
       </div>` : ''}
     </div>
     ${reqRows ? `<div class="section-head"><h2>🙋 Shift requests</h2></div>
@@ -1071,6 +1219,14 @@ async function renderSchedule(body) {
     toast('Declined'); renderSchedule(body);
   });
   if (isAdmin) {
+    body.querySelector('#resetHist').onclick = async () => {
+      if (!confirm('Clear ALL checklist submissions and populated checklists so completion rates start fresh today?\n\nUsers, checklists, spots, shifts, and chat are NOT touched. This cannot be undone.')) return;
+      if (!confirm('Last check — really wipe checklist history?')) return;
+      try {
+        const r = await api('/api/admin/reset-history', { method: 'POST' });
+        toast(`Cleared ${r.cleared.submissions} submissions and ${r.cleared.instances} checklists 🧹`);
+      } catch (e) { toast(e.message, true); }
+    };
     body.querySelector('#emailCfg').onclick = async () => {
       const cfg = await api('/api/emailcfg');
       const bg = modal(`<h2>✉️ Email sign-in setup</h2>
@@ -1149,7 +1305,7 @@ async function renderSchedule(body) {
     const bg = modal(`
       <h2>Add shift</h2>
       <label>Teammate</label><select id="shUser">${users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select>
-      <label>Location</label><select id="shCart"><option value="">— none —</option>${carts.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <label>Spot</label><select id="shCart"><option value="">— none —</option>${carts.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
       <div class="row">
         <div><label>Starts</label><input type="datetime-local" id="shStart" value="${date}T12:00"></div>
         <div><label>Ends</label><input type="datetime-local" id="shEnd" value="${date}T20:00"></div>
@@ -1194,7 +1350,7 @@ async function renderChecklistAdmin(body) {
         <div style="font-size:26px">${c.emoji}</div>
         <div class="info"><b>${esc(c.name)}</b>
           <span>${trigLabel[c.trigger] || c.trigger} ·
-          ${c.location_id ? esc(c.location_name) : c.category_id ? esc(c.category_name) + ' (category)' : 'All locations'} ·
+          ${c.location_id ? esc(c.location_name) : c.category_id ? esc(c.category_name) + ' (category)' : 'All spots'} ·
           ${c.job_role ? esc(c.job_role) : 'All roles'}${c.trigger === 'daily' ? ' · ' + (c.days.split(',').length === 7 ? 'Daily' : c.days.split(',').map(d => DAY_NAMES[d]).join(', ')) + (c.due_time ? ' · due ' + c.due_time : '') : ''} · ${c.items.length} items</span></div>
         <button class="btn ghost small" data-edit="${c.id}">Edit</button>
         ${isAdminCl ? `<button class="btn danger small" data-del="${c.id}">Delete</button>` : ''}
@@ -1237,7 +1393,7 @@ function checklistBuilder(cl, carts, cats, onSave) {
       <option value="daily" ${trigger === 'daily' ? 'selected' : ''}>📅 Daily — on a fixed schedule</option>
     </select>
     <div class="row">
-      <div><label>Location (specific)</label><select id="clLoc"><option value="">Any location</option>
+      <div><label>Spot (specific)</label><select id="clLoc"><option value="">Any spot</option>
         ${carts.map(l => `<option value="${l.id}" ${cl?.location_id === l.id ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></div>
       <div><label>…or category</label><select id="clCat"><option value="">Any category</option>
         ${cats.map(c => `<option value="${c.id}" ${cl?.category_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
@@ -1383,13 +1539,14 @@ function checklistBuilder(cl, carts, cats, onSave) {
 
 // ================= CARTS & TERRITORIES (admin) =================
 async function renderCarts(body) {
-  const [carts, cats, users, terrs] = await Promise.all([
-    api('/api/locations'), api('/api/categories'), api('/api/users'), api('/api/territories')]);
+  const [carts, cats, users, terrs, flavors] = await Promise.all([
+    api('/api/locations'), api('/api/categories'), api('/api/users'), api('/api/territories'), api('/api/flavors').catch(() => [])]);
+  FLAVOR_CACHE = flavors;
   function cartRow(c) {
     return `<div class="mrow">
       <div style="font-size:22px">🛒</div>
       <div class="info"><b>${esc(c.name)}</b>
-        <span>${c.territory_name ? '🗺️ ' + esc(c.territory_name) + ' · ' : '<span style="color:var(--red)">🗺️ no territory · </span>'}🔔 ${c.notifier_names.length ? c.notifier_names.map(esc).join(', ') : 'territory manager only'}</span></div>
+        <span>${c.territory_name ? '🗺️ ' + esc(c.territory_name) + ' · ' : '<span style="color:var(--red)">🗺️ no territory · </span>'}${(c.keywords || []).length ? '🧠 ' + c.keywords.slice(0, 3).map(esc).join(', ') + ' · ' : ''}${(c.flavor_ids || []).length ? '🍦 ' + c.flavor_ids.length + ' flavors · ' : ''}🔔 ${c.notifier_names.length ? c.notifier_names.map(esc).join(', ') : 'territory manager only'}</span></div>
       <button class="btn ghost small" data-edit="${c.id}">Edit</button>
       <button class="btn danger small" data-del="${c.id}">Remove</button>
     </div>`;
@@ -1405,7 +1562,7 @@ async function renderCarts(body) {
     <div class="mrow">
       <div style="font-size:22px">🗺️</div>
       <div class="info"><b>${esc(t.name)}</b>
-        <span>${t.cart_count} locations · Managers: ${t.manager_names.length ? t.manager_names.map(esc).join(', ') : '<span style="color:var(--red)">none assigned</span>'} ·
+        <span>${t.cart_count} spots · Managers: ${t.manager_names.length ? t.manager_names.map(esc).join(', ') : '<span style="color:var(--red)">none assigned</span>'} ·
         ⬛ ${t.square_location_name ? esc(t.square_location_name) : '<span style="color:var(--red)">no Square location linked</span>'}</span></div>
       <button class="btn teal small" data-sqterr="${t.id}">⬛ Link Square</button>
       <button class="btn ghost small" data-renterr="${t.id}" data-name="${esc(t.name)}">Rename</button>
@@ -1417,10 +1574,11 @@ async function renderCarts(body) {
       <button class="btn" id="newTerr">+ Add territory</button></div>
     <p style="color:var(--ink-soft);font-size:14px;margin:0 0 6px">Assign managers to territories in the Team menu. Managers are automatically alerted when checklists in their territories go overdue, and each territory gets its own chat channel.</p>
     ${terrRows || '<div class="empty">No territories yet.</div>'}
-    <div class="section-head" style="margin-top:26px"><h2>Locations</h2><div class="spacer"></div>
+    <div class="section-head" style="margin-top:26px"><h2>Spots</h2><div class="spacer"></div>
+      <button class="btn ghost small" id="rematchBtn">🧠 Re-match shifts</button>
       <button class="btn ghost small" id="newCat">+ Category</button>
-      <button class="btn" id="newCart">+ Add location</button></div>
-    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 6px">Location names should match what you write in Square shift notes. Extra notifiers (beyond the territory manager) can be set per location.</p>
+      <button class="btn" id="newCart">+ Add spot</button></div>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 6px">Spot names (or their keywords) should match what you write in Square shift notes. Extra notifiers can be set per spot.</p>
     ${groups}
     ${uncat ? `<div class="cat-head"><h3>Uncategorized</h3></div>${uncat}` : ''}
   `;
@@ -1453,10 +1611,15 @@ async function renderCarts(body) {
     refresh();
   });
   body.querySelectorAll('[data-delterr]').forEach(b => b.onclick = async () => {
-    if (!confirm('Remove this territory? Its locations stay but lose the territory; its chat channel is deleted.')) return;
+    if (!confirm('Remove this territory? Its spots stay but lose the territory; its chat channel is deleted.')) return;
     await api('/api/territories/' + b.dataset.delterr, { method: 'DELETE' });
     toast('Territory removed'); refresh();
   });
+  body.querySelector('#rematchBtn').onclick = async () => {
+    const r = await api('/api/locations/rematch', { method: 'POST' });
+    toast(r.fixed ? `Matched ${r.fixed} shift${r.fixed > 1 ? 's' : ''} to spots 🧠` : 'No unmatched shifts to fix');
+    refresh();
+  };
   body.querySelector('#newCart').onclick = () => cartForm(null, cats, users, terrs, refresh);
   body.querySelector('#newCat').onclick = async () => {
     const name = prompt('New category name');
@@ -1478,22 +1641,30 @@ async function renderCarts(body) {
   body.querySelectorAll('[data-edit]').forEach(b => b.onclick = () =>
     cartForm(carts.find(c => c.id == b.dataset.edit), cats, users, terrs, refresh));
   body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
-    if (!confirm('Remove this location?')) return;
+    if (!confirm('Remove this spot?')) return;
     await api('/api/locations/' + b.dataset.del, { method: 'DELETE' });
-    toast('Location removed'); refresh();
+    toast('Spot removed'); refresh();
   });
 }
 
+let FLAVOR_CACHE = [];
 function cartForm(cart, cats, users, terrs, onSave) {
   const notifiers = new Set(cart ? cart.notifier_ids : []);
   const bg = modal(`
-    <h2>${cart ? 'Edit' : 'Add'} location</h2>
-    <label>Name (must match Square shift notes)</label><input id="ctName" value="${esc(cart?.name || '')}" placeholder="e.g. Piedmont Park">
+    <h2>${cart ? 'Edit' : 'Add'} spot</h2>
+    <label>Spot name</label><input id="ctName" value="${esc(cart?.name || '')}" placeholder="e.g. Piedmont Park">
     <div class="row">
       <div><label>Category</label><select id="ctCat"><option value="">— none —</option>
         ${cats.map(c => `<option value="${c.id}" ${cart?.category_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
       <div><label>Territory</label><select id="ctTerr"><option value="">— none —</option>
         ${terrs.map(t => `<option value="${t.id}" ${cart?.territory_id === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></div>
+    </div>
+    <label>🧠 Shift-note keywords (comma separated — e.g. “12th St, 12th Street gate”)</label>
+    <input id="ctKeywords" value="${esc((cart?.keywords || []).join(', '))}" placeholder="Words in Square shift notes that mean this spot">
+    <label>🍦 Flavors to pack here</label>
+    <div class="card" style="padding:10px 14px;max-height:200px;overflow-y:auto" id="ctFlavors">
+      ${FLAVOR_CACHE.length ? FLAVOR_CACHE.map(f => `<label class="checkline"><input type="checkbox" data-fl="${f.id}" ${(cart?.flavor_ids || []).includes(f.id) ? 'checked' : ''}> ${f.emoji || '🍦'} ${esc(f.name)}${f.in_stock ? '' : ' <span style="color:var(--red)">(out)</span>'}</label>`).join('')
+        : '<span style="color:var(--ink-soft);font-size:13px">No flavors yet — add them in the Flavors menu.</span>'}
     </div>
     <label>🔔 Extra notifiers (territory managers are alerted automatically)</label>
     <div class="card" style="padding:10px 14px;max-height:220px;overflow-y:auto">
@@ -1507,13 +1678,69 @@ function cartForm(cart, cats, users, terrs, onSave) {
       category_id: Number(bg.querySelector('#ctCat').value) || null,
       territory_id: Number(bg.querySelector('#ctTerr').value) || null,
       notifier_ids: [...bg.querySelectorAll('[data-notif]:checked')].map(el => Number(el.dataset.notif)),
+      keywords: bg.querySelector('#ctKeywords').value.split(',').map(s => s.trim()).filter(Boolean),
+      flavor_ids: [...bg.querySelectorAll('[data-fl]:checked')].map(el => Number(el.dataset.fl)),
     };
     if (!payload.name) return toast('Give it a name', true);
     try {
       await api(cart ? '/api/locations/' + cart.id : '/api/locations', { method: cart ? 'PUT' : 'POST', json: payload });
-      bg.remove(); toast('Location saved 🍭'); onSave();
+      bg.remove(); toast('Spot saved 🍭'); onSave();
     } catch (e) { toast(e.message, true); }
   };
+}
+
+// ================= FLAVORS =================
+async function renderFlavors(body) {
+  const [flavors, spots] = await Promise.all([api('/api/flavors'), api('/api/locations')]);
+  const rows = flavors.map(f => {
+    const spotsWith = spots.filter(s => (s.flavor_ids || []).includes(f.id));
+    return `<div class="mrow">
+      <div style="font-size:24px">${f.emoji || '🍦'}</div>
+      <div class="info"><b>${esc(f.name)} ${f.in_stock ? '' : '<span class="pill red">out of stock</span>'}</b>
+        <span>${f.note ? esc(f.note) + ' · ' : ''}${spotsWith.length ? '📍 ' + spotsWith.map(s => esc(s.name)).join(', ') : 'not assigned to any spot yet'}</span></div>
+      <button class="btn ghost small" data-stock="${f.id}" data-in="${f.in_stock}">${f.in_stock ? 'Mark out' : 'Back in stock'}</button>
+      <button class="btn ghost small" data-editfl="${f.id}">Edit</button>
+      <button class="btn danger small" data-delfl="${f.id}">✕</button>
+    </div>`;
+  }).join('');
+  body.innerHTML = `
+    <div class="section-head"><h2>🍦 Flavor Strategy</h2><div class="spacer"></div>
+      <button class="btn" id="newFl">+ Add flavor</button></div>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 10px">Add what's in stock, then assign flavors to each spot (Spots menu → edit a spot). Slingers see their pack list on their home screen when they're on a shift there.</p>
+    ${rows || '<div class="empty"><div class="big">🍦</div>No flavors yet — add your first!</div>'}
+  `;
+  const refresh = () => renderFlavors(body);
+  const flForm = (f) => {
+    const bg = modal(`<h2>${f ? 'Edit' : 'Add'} flavor</h2>
+      <div class="row">
+        <div style="flex:0 0 70px"><label>Emoji</label><input id="flEmoji" value="${esc(f?.emoji || '🍦')}" maxlength="4"></div>
+        <div style="flex:3"><label>Name</label><input id="flName" value="${esc(f?.name || '')}" placeholder="e.g. Chocolate Sea Salt"></div>
+      </div>
+      <label>Note (optional)</label><input id="flNote" value="${esc(f?.note || '')}" placeholder="e.g. vegan · pack 2 cases">
+      <label class="checkline" style="margin-top:10px"><input type="checkbox" id="flStock" ${f ? (f.in_stock ? 'checked' : '') : 'checked'}> In stock</label>
+      <button class="btn teal" id="flGo" style="width:100%;margin-top:14px">Save flavor</button>`);
+    bg.querySelector('#flGo').onclick = async () => {
+      const payload = {
+        name: bg.querySelector('#flName').value, emoji: bg.querySelector('#flEmoji').value,
+        note: bg.querySelector('#flNote').value, in_stock: bg.querySelector('#flStock').checked,
+      };
+      try {
+        await api(f ? '/api/flavors/' + f.id : '/api/flavors', { method: f ? 'PUT' : 'POST', json: payload });
+        bg.remove(); toast('Flavor saved 🍦'); refresh();
+      } catch (e) { toast(e.message, true); }
+    };
+  };
+  body.querySelector('#newFl').onclick = () => flForm(null);
+  body.querySelectorAll('[data-editfl]').forEach(b => b.onclick = () => flForm(flavors.find(f => f.id == b.dataset.editfl)));
+  body.querySelectorAll('[data-stock]').forEach(b => b.onclick = async () => {
+    await api('/api/flavors/' + b.dataset.stock, { method: 'PUT', json: { in_stock: b.dataset.in !== '1' } });
+    refresh();
+  });
+  body.querySelectorAll('[data-delfl]').forEach(b => b.onclick = async () => {
+    if (!confirm('Delete this flavor? It will be removed from all spots.')) return;
+    await api('/api/flavors/' + b.dataset.delfl, { method: 'DELETE' });
+    refresh();
+  });
 }
 
 // ================= TEAM =================
@@ -1564,7 +1791,7 @@ function userForm(u, carts, terrs, onSave) {
     <div id="terrWrap" style="display:none">
       <label>🗺️ Responsible for territories (pick any number)</label>
       <div class="card" style="padding:10px 14px">
-        ${terrs.map(t => `<label class="checkline"><input type="checkbox" data-terr="${t.id}" ${(u?.territory_ids || []).includes(t.id) ? 'checked' : ''}> ${esc(t.name)}</label>`).join('') || '<span style="color:var(--ink-soft);font-size:13px">No territories yet — create them in the Locations section.</span>'}
+        ${terrs.map(t => `<label class="checkline"><input type="checkbox" data-terr="${t.id}" ${(u?.territory_ids || []).includes(t.id) ? 'checked' : ''}> ${esc(t.name)}</label>`).join('') || '<span style="color:var(--ink-soft);font-size:13px">No territories yet — create them in the Spots section.</span>'}
       </div>
     </div>
     <div class="row">

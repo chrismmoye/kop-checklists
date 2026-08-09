@@ -10,7 +10,7 @@ A Jolt-style operations platform with King of Pops branding. Checklists auto-pop
 
 ## Reports
 
-📈 Reports (managers + admins): pick a date range, filter by checklist/territory — completion rates by checklist and by person, flagged answers with drill-down, and **Export CSV** (one row per answer) for feeding other systems. The same data is available programmatically at `GET /api/reports` (JSON) and `GET /api/reports/export.csv` — authenticate with an admin session cookie from `POST /api/login`.
+📈 Reports (managers + admins): presets for **Today / This week / This month / Custom**, three views — **By checklist**, **By team member**, **By territory** — each with a real completion rate (done ÷ expected), plus filters by checklist/territory — completion rates by checklist and by person, flagged answers with drill-down, and **Export CSV** (one row per answer) for feeding other systems. The same data is available programmatically at `GET /api/reports` (JSON) and `GET /api/reports/export.csv` — authenticate with an admin session cookie from `POST /api/login`.
 
 Everyone can use **⚡ Pick up a shift** (My checklists tab) when they work a shift that isn't in the schedule — it spawns their opening checklist immediately and the closing checklist 30 minutes before the end time they enter.
 
@@ -49,7 +49,7 @@ Open http://localhost:3000 — admin login: **chris.moye@kingofpops.com / popsic
 2. When a shift **starts**, the worker's ☀️ **Opening checklist** pops up on their phone.
 3. **30 minutes before shift end**, the 🌙 **Closing checklist** appears.
 4. Each checklist is due **1 hour after it appears**. After that it's **overdue** and every **notifier** for that cart gets an in-app alert + phone push notification.
-5. The **Dashboard** shows a live cart board: 🟢 Open · ⚫ Closed · 🟡 Not opened yet · 🔴 Overdue — plus every checklist's status and answers.
+5. The **Dashboard** lists every spot with its status — 🟢 Open · ⚫ Closed · 🟡 Not opened yet · 🔴 Needs attention · ⚪ No shift today — sorted so problems float to the top. Tap any spot to see who is working it, their clock-in times, each checklist with answers, and the day's setup photos.
 
 ## Connecting Square
 
@@ -60,9 +60,28 @@ Open http://localhost:3000 — admin login: **chris.moye@kingofpops.com / popsic
    - **Carts**: put the cart's name in the **shift notes** in Square (e.g., "Piedmont Park"). The cart name in the Carts tab must match. Unmatched shifts show a ❓ in the Schedule tab.
 4. Shifts re-sync automatically every 10 minutes (published, assigned shifts only).
 
+## Spots, territories & shift matching
+
+- A **territory** = a Square location (people clock into it in Square). Link them in Spots → each territory row → ⬛ Link Square.
+- A **spot** = the physical place a cart works (e.g. "Piedmont Park — 12th Street"). Spots belong to a territory.
+- Shifts map to a spot by scanning the Square shift notes for the spot's name, any part of its name after a dash (so "Piedmont Park — Active Oval" matches a note saying just "Active Oval"), or a learned **keyword**. Add keywords when editing a spot, or teach one on the fly: open a shift → set the spot → pick the note phrase to remember. Use **🧠 Re-match shifts** in Spots to re-run matching over unmatched shifts.
+
+## Flavor strategy
+
+🍦 Flavors (managers + admins): keep the in-stock list current, then assign flavors to each spot (Spots → edit a spot). When a slinger is on a shift at that spot, their home screen shows the **Flavors to pack** card.
+
+## Populating checklists manually
+
+- Anyone: **➕ Add a checklist** on My checklists — limited to checklists for their job role (or role-agnostic ones).
+- Managers/admins: **📋 Assign checklist** on the Dashboard to push one to a specific teammate (they get a notification).
+
+## Fresh start
+
+Admins can wipe checklist history for a clean completion rate: Schedule → **🧹 Clear checklist history** (clears submissions + populated checklists only; users, checklists, spots, shifts and chat are untouched).
+
 ## Structure
 
-- **Carts & Spots** (Carts tab) are grouped into categories: Everyday Carts, Extra Special Carts, Catering Carts, Brick & Mortar (edit/add as you like). Each cart has **notifiers** — the people alerted when its checklists go overdue.
+- **Spots** (Spots menu) are grouped into categories: Everyday Carts, Extra Special Carts, Catering Carts, Brick & Mortar (edit/add as you like). Each cart has **notifiers** — the people alerted when its checklists go overdue.
 - **Checklists** have a trigger: ☀️ Opening (start of shift), 🌙 Closing (30 min before end), or 📅 Daily (fixed schedule, like kitchen sanitation). Scope any checklist to a specific cart, a category, or a role.
 - Item types: checkbox, yes/no, multiple choice, number (with OK-range + unit — out-of-range answers get flagged ⚑), text, photo.
 - **If/then branching**: any item can be set to show only when an earlier answer matches a condition — `is` / `is not` for choice, yes/no and checkbox, and `is below / at most / above / at least / equals / is not` for numbers. Example: *Freezer temperature* → if above 0°F, show *What did you find?* → if that's *Unit failure*, show *Photo of the unit*. Conditions chain as deep as you like; hidden questions aren't required and are recorded as skipped.
