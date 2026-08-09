@@ -151,6 +151,24 @@ function migrate(d) {
     d.flavors = d.flavors || [];             // { id, name, emoji, note, in_stock, created_at }
     changed = true;
   }
+  if (d.version < 10) {
+    d.version = 10;
+    (d.flavors || []).forEach(f => {
+      if (f.profile === undefined) f.profile = null;         // 'Fruity' | 'Creamy'
+      if (f.commitment === undefined) f.commitment = null;   // 'Full-time' | 'Part-time'
+      if (f.pricing === undefined) f.pricing = null;         // 'Everyday' | 'Extra-Special'
+      if (!f.category_ids) f.category_ids = [];              // spot categories this flavor goes to
+    });
+    (d.users || []).forEach(u => { if (u.avatar === undefined) u.avatar = null; });
+    (d.checklists || []).forEach(c => (c.items || []).forEach(it => {
+      if (it.flag_mode === undefined) {
+        it.flag_mode = it.type === 'number' ? 'auto' : it.type === 'yesno' ? 'auto' : 'never';
+        it.flag_values = null;
+      }
+    }));
+    d.waste_logs = d.waste_logs || []; // { id, user_id, spot_id, count, reason, date, created_at }
+    changed = true;
+  }
   if (changed) setTimeout(() => persist(), 0);
 }
 
@@ -241,9 +259,9 @@ function seed() {
     open_shifts: [],
     shift_requests: [],
     announcements: [],
-    postings: [], applications: [], referrals: [], suggestions: [], login_tokens: [], flavors: [],
+    postings: [], applications: [], referrals: [], suggestions: [], login_tokens: [], flavors: [], waste_logs: [],
   };
-  d.version = 9;
+  d.version = 10;
   setTimeout(() => persist(), 0);
   return d;
 }

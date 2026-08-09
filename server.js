@@ -66,6 +66,11 @@ function cartOut(l) {
     keywords: l.keywords || [],
     flavor_ids: l.flavor_ids || [],
     flavors: (l.flavor_ids || []).map(id => (data.flavors || []).find(f => f.id === id)).filter(Boolean),
+    flavor_plan: (() => {
+      const direct = (l.flavor_ids || []);
+      const byCat = (data.flavors || []).filter(f => l.category_id && (f.category_ids || []).includes(l.category_id)).map(f => f.id);
+      return [...new Set([...direct, ...byCat])].map(id => (data.flavors || []).find(f => f.id === id)).filter(Boolean);
+    })(),
   };
 }
 function shiftOut(s) {
@@ -148,6 +153,20 @@ on('POST', '/api/logout', (req, res) => {
   send(res, 200, { ok: true });
 });
 on('GET', '/api/me', (req, res) => send(res, 200, { user: req.user ? publicUser(req.user) : null }));
+on('POST', '/api/me/avatar', (req, res) => {
+  const b = req.body || {};
+  if (!b.image) return send(res, 400, { error: 'No image' });
+  try {
+    const saved = saveDataUrl(b.image, 'avatar.jpg');
+    if (!saved) return send(res, 400, { error: 'Bad image' });
+    req.user.avatar = saved.fname; save();
+    send(res, 200, { ok: true, avatar: saved.fname });
+  } catch (e) { send(res, 400, { error: e.message }); }
+}, { auth: true, bigBody: true });
+on('DELETE', '/api/me/avatar', (req, res) => {
+  req.user.avatar = null; save();
+  send(res, 200, { ok: true });
+}, { auth: true });
 on('POST', '/api/me/password', (req, res) => {
   const { current, next } = req.body || {};
   if (!verifyPassword(current || '', req.user.password_hash)) return send(res, 400, { error: 'Current password is wrong' });
@@ -530,11 +549,20 @@ on('POST', '/api/checklists/:id/submit', (req, res) => {
       const value = raw != null ? String(raw) : null;
       let flagged = 0;
       if (!visible) return { item_id: it.id, value: null, photo: null, flagged: 0, skipped: 1 };
-      if (it.type === 'number' && value) {
-        const n = Number(value);
-        if ((it.min != null && n < it.min) || (it.max != null && n > it.max)) flagged = 1;
+      const mode = it.flag_mode || (it.type === 'number' || it.type === 'yesno' ? 'auto' : 'never');
+      if (mode === 'auto') {
+        if (it.type === 'number' && value) {
+          const n = Number(value);
+          if ((it.min != null && n < it.min) || (it.max != null && n > it.max)) flagged = 1;
+        }
+        if (it.type === 'yesno' && value === 'no') flagged = 1;
+        if (it.type === 'checkbox' && value !== 'yes') flagged = 1;
+      } else if (mode === 'values') {
+        const wanted = String(it.flag_values || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+        const v2 = String(value ?? '').trim().toLowerCase();
+        if (wanted.length && wanted.includes(v2)) flagged = 1;
+        if (wanted.includes('(blank)') && !v2) flagged = 1;
       }
-      if (it.type === 'yesno' && value === 'no') flagged = 1;
       return { item_id: it.id, value, photo: photoFiles[it.id] || null, flagged };
     }),
   };
@@ -688,6 +716,10 @@ on('POST', '/api/flavors', (req, res) => {
   const f = {
     id: nextId('flavor'), name, emoji: String(b.emoji || '🍦').slice(0, 4),
     note: String(b.note || '').trim() || null, in_stock: b.in_stock === false ? 0 : 1,
+    profile: ['Fruity', 'Creamy'].includes(b.profile) ? b.profile : null,
+    commitment: ['Full-time', 'Part-time'].includes(b.commitment) ? b.commitment : null,
+    pricing: ['Everyday', 'Extra-Special'].includes(b.pricing) ? b.pricing : null,
+    category_ids: (b.category_ids || []).map(Number),
     created_at: new Date().toISOString(),
   };
   data.flavors.push(f); save();
@@ -701,6 +733,10 @@ on('PUT', '/api/flavors/:id', (req, res) => {
   if (b.emoji != null) f.emoji = String(b.emoji).slice(0, 4);
   if (b.note !== undefined) f.note = String(b.note || '').trim() || null;
   if (b.in_stock !== undefined) f.in_stock = b.in_stock ? 1 : 0;
+  if (b.profile !== undefined) f.profile = ['Fruity', 'Creamy'].includes(b.profile) ? b.profile : null;
+  if (b.commitment !== undefined) f.commitment = ['Full-time', 'Part-time'].includes(b.commitment) ? b.commitment : null;
+  if (b.pricing !== undefined) f.pricing = ['Everyday', 'Extra-Special'].includes(b.pricing) ? b.pricing : null;
+  if (b.category_ids !== undefined) f.category_ids = (b.category_ids || []).map(Number);
   save();
   send(res, 200, f);
 }, { level: 'manager' });
@@ -712,11 +748,32 @@ on('DELETE', '/api/flavors/:id', (req, res) => {
   send(res, 200, { ok: true });
 }, { level: 'manager' });
 // what should I pack? (per spot)
+function flavorsForSpot(spot) {
+  if (!spot) return [];
+  const direct = (spot.flavor_ids || []);
+  const byCat = (data.flavors || []).filter(f => spot.category_id && (f.category_ids || []).includes(spot.category_id)).map(f => f.id);
+  const ids = [...new Set([...direct, ...byCat])];
+  return ids.map(id => (data.flavors || []).find(f => f.id === id)).filter(Boolean);
+}
 on('GET', '/api/flavors/plan', (req, res) => {
   const spotId = Number(req.query.spot_id) || null;
   const spot = spotId ? cartById(spotId) : null;
-  const list = spot ? (spot.flavor_ids || []).map(id => (data.flavors || []).find(f => f.id === id)).filter(Boolean) : [];
-  send(res, 200, { spot_id: spotId, spot_name: spot ? spot.name : null, flavors: list });
+  send(res, 200, {
+    spot_id: spotId, spot_name: spot ? spot.name : null,
+    category_name: spot && spot.category_id ? ((catById(spot.category_id) || {}).name || null) : null,
+    flavors: flavorsForSpot(spot),
+  });
+}, { auth: true });
+// full strategy board: every spot category with its flavors
+on('GET', '/api/flavors/board', (req, res) => {
+  const cats = data.categories.map(c => ({
+    category_id: c.id, name: c.name,
+    flavors: (data.flavors || []).filter(f => (f.category_ids || []).includes(c.id)),
+    spot_count: data.locations.filter(l => l.active && l.category_id === c.id).length,
+  }));
+  const unassigned = (data.flavors || []).filter(f => !(f.category_ids || []).length &&
+    !data.locations.some(l => (l.flavor_ids || []).includes(f.id)));
+  send(res, 200, { categories: cats, unassigned });
 }, { auth: true });
 
 // ---------- users ----------
@@ -821,6 +878,8 @@ function normalizeItems(items) {
     options: it.options ? String(it.options).trim() : null,
     cond_index: it.cond_index === '' || it.cond_index == null ? null : Number(it.cond_index),
     cond_op: ['eq', 'ne', 'gt', 'gte', 'lt', 'lte'].includes(it.cond_op) ? it.cond_op : 'eq',
+    flag_mode: ['auto', 'never', 'values'].includes(it.flag_mode) ? it.flag_mode : (it.type === 'number' || it.type === 'yesno' ? 'auto' : 'never'),
+    flag_values: it.flag_values ? String(it.flag_values).trim() : null,
     cond_value: it.cond_value != null && String(it.cond_value) !== '' ? String(it.cond_value) : null,
     min: it.min === '' || it.min == null ? null : Number(it.min),
     max: it.max === '' || it.max == null ? null : Number(it.max),
@@ -1126,7 +1185,7 @@ function channelOut(c, u) {
 on('GET', '/api/chat/people', (req, res) => {
   send(res, 200, data.users.filter(u => u.active && u.id !== req.user.id)
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map(u => ({ id: u.id, name: u.name, level: u.level })));
+    .map(u => ({ id: u.id, name: u.name, level: u.level, avatar: u.avatar || null })));
 }, { auth: true });
 on('GET', '/api/chat/channels', (req, res) => {
   const chans = visibleChannels(req.user).map(c => channelOut(c, req.user));
@@ -1277,12 +1336,20 @@ on('GET', '/api/dashboard', (req, res) => {
     const closeDone = closing.find(i => i.status === 'complete');
     const overdue = inst.some(i => i.status === 'overdue') || dailyHere.some(r => r.status === 'missed');
     const pending = inst.filter(i => i.status === 'pending').length + dailyHere.filter(r => r.status === 'pending').length;
+    // status light: live (blinking green) · closed_ok (solid green) · incomplete (yellow) · never_opened (red) · scheduled · idle
+    const now = Date.now();
+    const tcs = data.timecards.filter(t => shiftIds.includes(t.shift_id));
+    const clockedOut = tcs.length > 0 && tcs.every(t => t.clock_out_at);
+    const anyStarted = shifts.some(s => new Date(s.start_at).getTime() <= now);
+    const allEnded = shifts.length > 0 && shifts.every(s => new Date(s.end_at).getTime() <= now);
+    const allDone = (inst.length + dailyHere.length) > 0 &&
+      inst.every(i => i.status === 'complete') && dailyHere.every(r => r.status === 'complete');
     let state;
-    if (!shifts.length && !dailyHere.length) state = 'no_shift';
-    else if (closeDone) state = 'closed';
-    else if (overdue) state = 'overdue';
-    else if (openDone) state = 'open';
-    else if (opening.length || dailyHere.length) state = 'not_opened';
+    if (!shifts.length && !dailyHere.length) state = 'idle';
+    else if ((closeDone || clockedOut || allEnded) && allDone) state = 'closed_ok';
+    else if ((clockedOut || allEnded) && !allDone) state = 'incomplete';
+    else if (openDone) state = 'live';
+    else if (anyStarted || overdue) state = 'never_opened';
     else state = 'scheduled';
     const done = inst.filter(i => i.status === 'complete').length + dailyHere.filter(r => r.status === 'complete').length;
     const total = inst.length + dailyHere.length;
@@ -1320,7 +1387,7 @@ on('GET', '/api/dashboard', (req, res) => {
       board.push(rowFor(null, tid ? `🗺️ ${tName} — spot not set` : '❓ Unmatched shifts', tName, '', shifts));
     }
   }
-  const ORDER = { overdue: 0, not_opened: 1, open: 2, scheduled: 3, closed: 4, no_shift: 5 };
+  const ORDER = { never_opened: 0, incomplete: 1, live: 2, scheduled: 3, closed_ok: 4, idle: 5 };
   board.sort((a, b) => (ORDER[a.state] - ORDER[b.state]) ||
     String(a.territory_name).localeCompare(String(b.territory_name)) ||
     String(a.cart_name).localeCompare(String(b.cart_name)));
@@ -1395,6 +1462,82 @@ on('GET', '/api/spots/:id/day', (req, res) => {
     instances: detail, daily: dailyHere, photos, flavors,
   });
 }, { level: 'manager' });
+
+on('GET', '/api/flagged', (req, res) => {
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : businessDate();
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : from;
+  const terrId = Number(req.query.territory_id) || null;
+  const rows = [];
+  for (const s of data.submissions.filter(x => x.date >= from && x.date <= to)) {
+    if (terrId && submissionTerritory(s) !== terrId) continue;
+    const c = data.checklists.find(x => x.id === s.checklist_id);
+    if (!c) continue;
+    const u = s.user_id ? userById(s.user_id) : null;
+    const inst = s.instance_id ? data.instances.find(i => i.id === s.instance_id) : null;
+    const shift = inst && inst.shift_id ? data.shifts.find(x => x.id === inst.shift_id) : null;
+    for (const r of s.responses.filter(x => x.flagged)) {
+      const it = c.items.find(x => x.id === r.item_id);
+      rows.push({
+        submission_id: s.id, date: s.date, completed_at: s.completed_at,
+        checklist_name: c.name, emoji: c.emoji,
+        user_name: u ? u.name : '—', user_avatar: u ? u.avatar : null,
+        spot_name: s.location_id ? ((cartById(s.location_id) || {}).name || null) : null,
+        shift_time: shift ? `${new Date(shift.start_at).toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' })} – ${new Date(shift.end_at).toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' })}` : null,
+        question: it ? it.label : '?', answer: r.photo ? '[photo]' : r.value,
+        unit: it ? it.unit : null,
+        expected: it && it.type === 'number' && (it.min != null || it.max != null)
+          ? `ok range ${it.min ?? '−∞'}–${it.max ?? '∞'}${it.unit ? ' ' + it.unit : ''}` : null,
+      });
+    }
+  }
+  rows.sort((a, b) => String(b.completed_at).localeCompare(String(a.completed_at)));
+  send(res, 200, rows.slice(0, 200));
+}, { level: 'manager' });
+
+// ---------- wasted pops ----------
+on('POST', '/api/waste', (req, res) => {
+  const b = req.body || {};
+  const count = Number(b.count);
+  const reason = ['Melted', 'Expired', 'Opened'].includes(b.reason) ? b.reason : null;
+  if (!Number.isFinite(count) || count <= 0) return send(res, 400, { error: 'How many pops? Enter a number above 0' });
+  if (!reason) return send(res, 400, { error: 'Pick a reason' });
+  const openTc = data.timecards.find(t => t.user_id === req.user.id && !t.clock_out_at);
+  const shift = openTc ? data.shifts.find(s => s.id === openTc.shift_id) : null;
+  const entry = {
+    id: nextId('waste'), user_id: req.user.id,
+    spot_id: b.spot_id ? Number(b.spot_id) : (shift ? shift.cart_id : null),
+    count, reason, date: businessDate(), created_at: new Date().toISOString(),
+  };
+  data.waste_logs.push(entry); save();
+  send(res, 200, { ok: true, entry });
+}, { auth: true });
+on('GET', '/api/waste', (req, res) => {
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : businessDate(new Date(Date.now() - 29 * 86400000));
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : businessDate();
+  const rows = (data.waste_logs || []).filter(w => w.date >= from && w.date <= to);
+  const byUser = new Map(), byReason = new Map(), bySpot = new Map();
+  let total = 0;
+  for (const w of rows) {
+    total += w.count;
+    byUser.set(w.user_id, (byUser.get(w.user_id) || 0) + w.count);
+    byReason.set(w.reason, (byReason.get(w.reason) || 0) + w.count);
+    if (w.spot_id) bySpot.set(w.spot_id, (bySpot.get(w.spot_id) || 0) + w.count);
+  }
+  const topUser = [...byUser.entries()].sort((a, b) => b[1] - a[1])[0];
+  const topReason = [...byReason.entries()].sort((a, b) => b[1] - a[1])[0];
+  send(res, 200, {
+    from, to, total,
+    top_waster: topUser ? { name: (userById(topUser[0]) || {}).name || '—', count: topUser[1] } : null,
+    top_reason: topReason ? { reason: topReason[0], count: topReason[1] } : null,
+    by_reason: [...byReason.entries()].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count),
+    by_person: [...byUser.entries()].map(([id, count]) => ({ name: (userById(id) || {}).name || '—', count })).sort((a, b) => b.count - a.count),
+    by_spot: [...bySpot.entries()].map(([id, count]) => ({ name: (cartById(id) || {}).name || '—', count })).sort((a, b) => b.count - a.count),
+    entries: rows.slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 200).map(w => ({
+      ...w, user_name: (userById(w.user_id) || {}).name || '—',
+      spot_name: w.spot_id ? ((cartById(w.spot_id) || {}).name || null) : null,
+    })),
+  });
+}, { level: 'admin' });
 
 on('GET', '/api/trend', (req, res) => {
   const days = Math.min(Number(req.query.days) || 7, 30);

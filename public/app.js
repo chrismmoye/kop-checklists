@@ -157,7 +157,11 @@ function shell() {
   <div class="drawer-bg" id="drawerBg" hidden>
     <nav class="drawer">
       <div class="drawer-head">
-        <img src="/mark.png" alt="">
+        <button class="avatar-btn" id="avatarBtn" title="Change photo">
+          ${ME.avatar ? `<img src="/api/photos/${ME.avatar}" alt="">` : `<span class="avatar-fallback">${esc((ME.name || '?').trim()[0].toUpperCase())}</span>`}
+          <span class="avatar-edit">✎</span>
+        </button>
+        <input type="file" id="avatarFile" accept="image/*" hidden>
         <div><b>${esc(ME.name)}</b><span>${LEVELS[ME.level] || ''}</span></div>
       </div>
       ${tabs.map(t => { const [k, l] = t.split('|'); return `<button class="drawer-item ${TAB === k ? 'active' : ''}" data-tab="${k}">${l}</button>`; }).join('')}
@@ -175,6 +179,18 @@ function shell() {
   const closeDrawer = () => { drawerBg.classList.remove('open'); setTimeout(() => drawerBg.hidden = true, 200); };
   drawerBg.onclick = e => { if (e.target === drawerBg) closeDrawer(); };
   document.getElementById('logoutBtn').onclick = async () => { await api('/api/logout', { method: 'POST' }); ME = null; renderLogin(); };
+  const avFile = document.getElementById('avatarFile');
+  document.getElementById('avatarBtn').onclick = () => avFile.click();
+  avFile.onchange = async () => {
+    if (!avFile.files[0]) return;
+    try {
+      const image = await compressImage(avFile.files[0], 400, 0.85);
+      const r = await api('/api/me/avatar', { method: 'POST', json: { image } });
+      ME.avatar = r.avatar;
+      toast('Photo updated 📸');
+      shell();
+    } catch (e) { toast(e.message, true); }
+  };
   document.getElementById('pwBtn').onclick = () => {
     const bg = modal(`
       <h2>🔑 Change my password</h2>
@@ -522,11 +538,42 @@ async function renderMyTasks(body) {
     ${flavorCard(flavorPlan)}
     ${anns.slice(0, 2).map(an => annCard(an, false)).join('')}
     ${taskCards(instances, checklists) || `<div class="empty"><div class="big">🏖️</div>Nothing assigned right now. Clock in or wait for your shift — your opening checklist appears automatically.</div>`}
+    <button class="btn ghost" id="wasteBtn" style="width:100%;margin-top:16px">🗑️ Log wasted pops</button>
   `;
   bindTaskCards(body, instances, checklists, () => renderMyTasks(body));
   bindClock(body, () => renderMyTasks(body));
   body.querySelector('#pickupBtn').onclick = () => pickupShift(() => renderMyTasks(body));
   body.querySelector('#addClBtn').onclick = () => addChecklistModal(() => renderMyTasks(body));
+  body.querySelector('#wasteBtn').onclick = () => wasteModal(spotForFlavors);
+}
+
+async function wasteModal(spotId) {
+  const spots = await api('/api/locations').catch(() => []);
+  const bg = modal(`
+    <h2>🗑️ Wasted pops</h2>
+    <label>How many pops are you wasting?</label>
+    <input type="number" min="1" step="1" id="wCount" placeholder="e.g. 6">
+    <label>Why?</label>
+    <div class="choice-list" id="wReason">
+      ${['Melted', 'Expired', 'Opened'].map(r => `<button type="button" class="choice" data-r="${r}">${r === 'Melted' ? '🫠' : r === 'Expired' ? '📅' : '📦'} ${r}</button>`).join('')}
+    </div>
+    <label>Spot</label>
+    <select id="wSpot"><option value="">— none —</option>
+      ${spots.map(s => `<option value="${s.id}" ${spotId === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+    <button class="btn teal" id="wGo" style="width:100%;margin-top:16px">Log it</button>`);
+  let reason = null;
+  bg.querySelectorAll('#wReason .choice').forEach(b => b.onclick = () => {
+    bg.querySelectorAll('#wReason .choice').forEach(x => x.classList.remove('sel'));
+    b.classList.add('sel'); reason = b.dataset.r;
+  });
+  bg.querySelector('#wGo').onclick = async () => {
+    try {
+      await api('/api/waste', { method: 'POST', json: {
+        count: Number(bg.querySelector('#wCount').value), reason,
+        spot_id: Number(bg.querySelector('#wSpot').value) || null } });
+      bg.remove(); toast('Logged — thanks for tracking it 🗑️');
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 // ================= MY SHIFTS =================
@@ -717,31 +764,29 @@ async function renderDashboard(body) {
   if (DASH_DATE) params.set('date', DASH_DATE);
   if (DASH_TERR) params.set('territory_id', DASH_TERR);
   const trendParams = DASH_TERR ? '&territory_id=' + DASH_TERR : '';
-  const [dash, trend, anns] = await Promise.all([
-    api('/api/dashboard?' + params), api('/api/trend?days=7' + trendParams), api('/api/announcements').catch(() => [])]);
+  const [dash, trend, anns, flavorBoard] = await Promise.all([
+    api('/api/dashboard?' + params), api('/api/trend?days=7' + trendParams),
+    api('/api/announcements').catch(() => []), api('/api/flavors/board').catch(() => null)]);
   DASH_DATE = dash.date;
   const s = dash.summary;
 
   const stateInfo = {
-    open: ['🟢', 'Open', 'green'], closed: ['⚫', 'Closed', 'gray'], overdue: ['🔴', 'Needs attention', 'red'],
-    not_opened: ['🟡', 'Not opened yet', 'yellow'], scheduled: ['🕒', 'Shift scheduled', 'teal'], no_shift: ['⚪', 'No shift today', 'gray'],
+    live: ['live', 'Open now'], closed_ok: ['ok', 'Closed · all done'], incomplete: ['warn', 'Missing checklists'],
+    never_opened: ['bad', 'Never opened'], scheduled: ['sched', 'Scheduled'], idle: ['idle', 'No shift today'],
   };
   const spotRows = dash.board.map(b => {
-    const [icon, label, pill] = stateInfo[b.state] || ['❓', '?', 'gray'];
+    const [cls, label] = stateInfo[b.state] || ['idle', '—'];
     const bits = [];
-    if (b.workers.length) bits.push('🧍 ' + b.workers.map(esc).join(', '));
+    if (b.workers.length) bits.push(b.workers.map(esc).join(', '));
     if (b.opened_at) bits.push('opened ' + fmtTime(b.opened_at));
     if (b.closed_at) bits.push('closed ' + fmtTime(b.closed_at));
     if (b.photo_count) bits.push('📷 ' + b.photo_count);
     if (b.flags) bits.push('⚑ ' + b.flags);
-    return `<div class="mrow chat-row spot-row" data-spot="${b.cart_id ?? 'none'}">
-      <div style="font-size:20px">${icon}</div>
-      <div class="info"><b>${esc(b.cart_name)}</b>
-        <span>${b.territory_name ? esc(b.territory_name) + ' · ' : ''}${bits.join(' · ') || 'nothing yet today'}</span></div>
-      <div style="text-align:right;flex-shrink:0">
-        <span class="pill ${pill}">${label}</span>
-        ${b.total ? `<div style="font-size:12px;color:var(--ink-soft);font-weight:800;margin-top:4px">${b.done}/${b.total} done</div>` : ''}
-      </div>
+    return `<div class="spot-line" data-spot="${b.cart_id ?? 'none'}">
+      <span class="light ${cls}"></span>
+      <div class="spot-name"><b>${esc(b.cart_name)}</b>
+        <span>${bits.join(' · ') || label}</span></div>
+      <div class="spot-meta">${b.total ? `${b.done}/${b.total}` : ''}</div>
     </div>`;
   }).join('');
 
@@ -792,13 +837,23 @@ async function renderDashboard(body) {
       <div class="card stat c-teal"><div class="num">${s.pct}%</div><div class="lbl">Completion</div></div>
       <div class="card stat c-pink"><div class="num">${s.complete}/${s.total}</div><div class="lbl">Done</div></div>
       <div class="card stat c-red"><div class="num">${s.missed}</div><div class="lbl">Missed / overdue</div></div>
-      <div class="card stat c-orange"><div class="num">${s.flagged}</div><div class="lbl">Flagged answers</div></div>
+      <div class="card stat c-orange" id="flagStat" style="cursor:pointer"><div class="num">${s.flagged}</div><div class="lbl">Flagged answers ›</div></div>
     </div>
     <div class="section-head" style="margin-top:4px"><div class="subhead" style="margin:0">📣 Announcements</div><div class="spacer"></div>
       <button class="btn small" id="newAnn">+ Post</button></div>
     ${anns.length ? anns.slice(0, 3).map(an => annCard(an, true)).join('') : '<div class="empty" style="padding:14px">Nothing posted yet — share weekly updates here.</div>'}
+    <div class="subhead">🍦 Flavor strategy</div>
+    ${flavorBoardHtml(flavorBoard)}
     <div class="subhead">📍 Spots — tap for the day's details</div>
-    ${spotRows || '<div class="empty">No spots yet — add them in the Spots menu.</div>'}
+    <div class="card spots-box">
+      <div class="legend">
+        <span><span class="light live"></span>Open now</span>
+        <span><span class="light ok"></span>Closed · complete</span>
+        <span><span class="light warn"></span>Missing lists</span>
+        <span><span class="light bad"></span>Never opened</span>
+      </div>
+      ${spotRows || '<div class="empty">No spots yet — add them in the Spots menu.</div>'}
+    </div>
     <div class="card" style="margin-top:20px"><b style="font-size:13px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:1px">Last 7 days</b>
       <div class="trend">${bars}</div></div>
   `;
@@ -810,7 +865,39 @@ async function renderDashboard(body) {
   body.querySelector('#newAnn').onclick = () => postAnnouncement(() => renderDashboard(body));
   body.querySelector('#assignClBtn').onclick = () => assignChecklistModal(() => renderDashboard(body));
   bindAnnouncements(body, () => renderDashboard(body));
-  body.querySelectorAll('.spot-row').forEach(row => row.onclick = () => openSpotDay(row.dataset.spot, dash.date));
+  body.querySelectorAll('.spot-line').forEach(row => row.onclick = () => openSpotDay(row.dataset.spot, dash.date));
+  body.querySelector('#flagStat').onclick = () => openFlagged(dash.date, dash.date);
+}
+
+function flavorBoardHtml(board) {
+  if (!board) return '';
+  const cats = board.categories.filter(c => c.flavors.length);
+  if (!cats.length) return '<div class="empty" style="padding:14px">No flavors assigned yet — set them up in the Flavors menu.</div>';
+  return `<div class="card" style="margin-bottom:14px">
+    ${cats.map(c => `<div class="flavor-cat">
+      <div class="flavor-cat-name">${esc(c.name)} <span>· ${c.spot_count} spots</span></div>
+      <div class="flavor-list">${c.flavors.map(f =>
+        `<span class="flavor-chip ${f.in_stock ? '' : 'out'}">${f.emoji || '🍦'} ${esc(f.name)}${f.pricing === 'Extra-Special' ? ' <b>$5</b>' : f.pricing === 'Everyday' ? ' <b>$4</b>' : ''}</span>`).join('')}</div>
+    </div>`).join('')}
+  </div>`;
+}
+
+async function openFlagged(from, to) {
+  const q = new URLSearchParams({ from, to });
+  if (DASH_TERR) q.set('territory_id', DASH_TERR);
+  const rows = await api('/api/flagged?' + q).catch(() => []);
+  const list = rows.map(r => `
+    <div class="mrow chat-row" data-sub="${r.submission_id}">
+      <div style="font-size:20px">⚑</div>
+      <div class="info"><b>${esc(r.question)} → ${esc(r.answer ?? '—')}${r.unit ? ' ' + esc(r.unit) : ''}</b>
+        <span>${r.emoji || ''} ${esc(r.checklist_name)} · ${esc(r.user_name)}${r.spot_name ? ' · 📍 ' + esc(r.spot_name) : ''}
+        ${r.shift_time ? ' · 🕒 ' + esc(r.shift_time) : ''} · ${fmtTime(r.completed_at)}${r.expected ? ' · ' + esc(r.expected) : ''}</span></div>
+    </div>`).join('');
+  const bg = modal(`
+    <h2>⚑ Flagged answers</h2>
+    <p style="color:var(--ink-soft);font-size:14px;margin:0 0 10px">Answers that need a look — numbers outside their OK range, "No" answers, or any answer you marked as a concern in the checklist builder. ${prettyDate(from)}${from !== to ? ' → ' + prettyDate(to) : ''}</p>
+    ${list || '<div class="empty">Nothing flagged 🎉</div>'}`);
+  bg.querySelectorAll('[data-sub]').forEach(r => r.onclick = () => openSubmission(r.dataset.sub));
 }
 
 // ---- spot day detail ----
@@ -1062,6 +1149,8 @@ async function renderReports(body) {
   if (REP_TERR) params.set('territory_id', REP_TERR);
   const [rep, lists, terrs] = await Promise.all([
     api('/api/reports?' + params), api('/api/checklists'), api('/api/territories')]);
+  const waste = (REP_VIEW === 'waste' && rank(ME) === 2)
+    ? await api(`/api/waste?from=${REP_FROM}&to=${REP_TO}`).catch(() => null) : null;
   const t = rep.totals;
 
   const clRows = rep.checklists.map(c => `
@@ -1116,9 +1205,10 @@ async function renderReports(body) {
       <div class="card stat c-orange"><div class="num">${t.flags}</div><div class="lbl">Flagged</div></div>
     </div>
     <div class="chat-chips" style="margin:14px 0 10px">
-      ${[['all', '📋 By checklist'], ['people', '🧑‍🍳 By team member'], ['terr', '🗺️ By territory']].map(([k, l]) =>
+      ${[['all', '📋 By checklist'], ['people', '🧑‍🍳 By team member'], ['terr', '🗺️ By territory'], ...(rank(ME) === 2 ? [['waste', '🗑️ Waste Log']] : [])].map(([k, l]) =>
         `<button class="chip ${REP_VIEW === k ? 'active' : ''}" data-view="${k}">${l}</button>`).join('')}
     </div>
+    ${REP_VIEW === 'waste' ? wasteHtml(waste) : ''}
     ${REP_VIEW === 'all' ? (clRows ? `<div class="table-wrap"><table class="grid"><tr><th>Checklist</th><th>Done</th><th>Rate</th><th>Missed</th><th>Flags</th></tr>${clRows}</table></div>` : '<div class="empty">No activity in this range.</div>') : ''}
     ${REP_VIEW === 'people' ? (peopleRows ? `<div class="table-wrap"><table class="grid"><tr><th>Person</th><th>Done</th><th>Rate</th><th>Missed</th><th>Flags</th></tr>${peopleRows}</table></div>` : '<div class="empty">No activity in this range.</div>') : ''}
     ${REP_VIEW === 'terr' ? (terrRows ? `<div class="table-wrap"><table class="grid"><tr><th>Territory</th><th>Done</th><th>Rate</th><th>Missed</th><th>Flags</th></tr>${terrRows}</table></div>` : '<div class="empty">No activity in this range.</div>') : ''}
@@ -1134,6 +1224,29 @@ async function renderReports(body) {
   body.querySelector('#repCl').onchange = e => { REP_CL = e.target.value; rerun(); };
   body.querySelector('#repTerr').onchange = e => { REP_TERR = e.target.value; rerun(); };
   body.querySelectorAll('[data-sub]').forEach(r => r.onclick = () => openSubmission(r.dataset.sub));
+}
+
+function wasteHtml(w) {
+  if (!w) return '<div class="empty">Loading…</div>';
+  const rows = w.entries.map(e => `
+    <tr><td>${prettyDate(e.date)} · ${fmtTime(e.created_at)}</td>
+      <td><b>${esc(e.user_name)}</b></td>
+      <td>${e.count}</td>
+      <td>${esc(e.reason)}</td>
+      <td>${esc(e.spot_name || '—')}</td></tr>`).join('');
+  return `
+    <div class="stats">
+      <div class="card stat c-red"><div class="num">${w.total}</div><div class="lbl">Pops wasted</div></div>
+      <div class="card stat c-orange"><div class="num" style="font-size:19px;font-family:Nunito">${w.top_waster ? esc(w.top_waster.name) : '—'}</div><div class="lbl">Top waster${w.top_waster ? ' · ' + w.top_waster.count : ''}</div></div>
+      <div class="card stat c-pink"><div class="num" style="font-size:19px;font-family:Nunito">${w.top_reason ? esc(w.top_reason.reason) : '—'}</div><div class="lbl">Top reason${w.top_reason ? ' · ' + w.top_reason.count : ''}</div></div>
+    </div>
+    ${w.by_reason.length ? `<div class="subhead">By reason</div>
+      <div class="card"><div class="flavor-list">${w.by_reason.map(r => `<span class="flavor-chip">${esc(r.reason)} · ${r.count}</span>`).join('')}</div></div>` : ''}
+    ${w.by_spot.length ? `<div class="subhead">By spot</div>
+      <div class="card"><div class="flavor-list">${w.by_spot.map(r => `<span class="flavor-chip">${esc(r.name)} · ${r.count}</span>`).join('')}</div></div>` : ''}
+    <div class="subhead">Every entry</div>
+    ${rows ? `<div class="table-wrap"><table class="grid"><tr><th>When</th><th>Who</th><th>Pops</th><th>Why</th><th>Spot</th></tr>${rows}</table></div>`
+      : '<div class="empty">No waste logged in this range 🎉</div>'}`;
 }
 
 // ================= SCHEDULE =================
@@ -1434,6 +1547,15 @@ function checklistBuilder(cl, carts, cats, onSave) {
             <input type="number" step="any" data-f="max" data-i="${i}" value="${it.max ?? ''}" placeholder="Max OK">` : ''}
           ${it.type === 'choice' ? `
             <input class="wide" data-f="options" data-i="${i}" value="${esc(it.options || '')}" placeholder="Options, separated by commas (e.g. Full, Half, Empty)">` : ''}
+          ${['number', 'yesno', 'checkbox', 'choice', 'text'].includes(it.type) ? `
+            <select data-flagmode="${i}" style="flex:1;min-width:150px" title="When should this answer be flagged for review?">
+              <option value="never" ${(it.flag_mode || 'never') === 'never' ? 'selected' : ''}>⚑ never flag</option>
+              ${it.type === 'number' ? `<option value="auto" ${it.flag_mode === 'auto' ? 'selected' : ''}>⚑ outside OK range</option>` : ''}
+              ${it.type === 'yesno' ? `<option value="auto" ${it.flag_mode === 'auto' ? 'selected' : ''}>⚑ when answer is No</option>` : ''}
+              ${it.type === 'checkbox' ? `<option value="auto" ${it.flag_mode === 'auto' ? 'selected' : ''}>⚑ when left unchecked</option>` : ''}
+              <option value="values" ${it.flag_mode === 'values' ? 'selected' : ''}>⚑ specific answers…</option>
+            </select>
+            ${it.flag_mode === 'values' ? `<input data-flagvals="${i}" value="${esc(it.flag_values || '')}" placeholder="flag these answers (comma separated)" style="flex:2;min-width:160px">` : ''}` : ''}
           <button type="button" class="btn ghost mini" data-req="${i}">${it.required ? 'Required ✓' : 'Optional'}</button>
           <button type="button" class="btn ghost mini" data-up="${i}" ${i === 0 ? 'disabled' : ''}>↑</button>
           <button type="button" class="btn ghost mini" data-down="${i}" ${i === items.length - 1 ? 'disabled' : ''}>↓</button>
@@ -1491,6 +1613,15 @@ function checklistBuilder(cl, carts, cats, onSave) {
         }
       } else { it.cond_value = null; it.cond_op = 'eq'; }
       drawItems();
+    });
+    itemsEl.querySelectorAll('[data-flagmode]').forEach(el => el.onchange = () => {
+      items[el.dataset.flagmode].flag_mode = el.value;
+      if (el.value !== 'values') items[el.dataset.flagmode].flag_values = null;
+      drawItems();
+    });
+    itemsEl.querySelectorAll('[data-flagvals]').forEach(el => {
+      const set = () => items[el.dataset.flagvals].flag_values = el.value;
+      el.onchange = set; el.oninput = set;
     });
     itemsEl.querySelectorAll('[data-condop]').forEach(el => el.onchange = () => { items[el.dataset.condop].cond_op = el.value; });
     itemsEl.querySelectorAll('[data-condv]').forEach(el => {
@@ -1690,14 +1821,17 @@ function cartForm(cart, cats, users, terrs, onSave) {
 }
 
 // ================= FLAVORS =================
+let CATS_CACHE = [];
 async function renderFlavors(body) {
-  const [flavors, spots] = await Promise.all([api('/api/flavors'), api('/api/locations')]);
+  const [flavors, spots, cats] = await Promise.all([api('/api/flavors'), api('/api/locations'), api('/api/categories')]);
+  CATS_CACHE = cats;
   const rows = flavors.map(f => {
     const spotsWith = spots.filter(s => (s.flavor_ids || []).includes(f.id));
     return `<div class="mrow">
       <div style="font-size:24px">${f.emoji || '🍦'}</div>
       <div class="info"><b>${esc(f.name)} ${f.in_stock ? '' : '<span class="pill red">out of stock</span>'}</b>
-        <span>${f.note ? esc(f.note) + ' · ' : ''}${spotsWith.length ? '📍 ' + spotsWith.map(s => esc(s.name)).join(', ') : 'not assigned to any spot yet'}</span></div>
+        <span>${[f.profile, f.commitment, f.pricing === 'Everyday' ? 'Everyday $4' : f.pricing === 'Extra-Special' ? 'Extra-Special $5' : null].filter(Boolean).map(esc).join(' · ')}${f.note ? ' · ' + esc(f.note) : ''}<br>
+        ${(f.category_ids || []).length ? '🏷️ ' + f.category_ids.map(id => esc((cats.find(c => c.id === id) || {}).name || '')).filter(Boolean).join(', ') : ''}${spotsWith.length ? ' · 📍 ' + spotsWith.map(s => esc(s.name)).join(', ') : ''}${!(f.category_ids || []).length && !spotsWith.length ? 'not assigned yet' : ''}</span></div>
       <button class="btn ghost small" data-stock="${f.id}" data-in="${f.in_stock}">${f.in_stock ? 'Mark out' : 'Back in stock'}</button>
       <button class="btn ghost small" data-editfl="${f.id}">Edit</button>
       <button class="btn danger small" data-delfl="${f.id}">✕</button>
@@ -1716,6 +1850,24 @@ async function renderFlavors(body) {
         <div style="flex:0 0 70px"><label>Emoji</label><input id="flEmoji" value="${esc(f?.emoji || '🍦')}" maxlength="4"></div>
         <div style="flex:3"><label>Name</label><input id="flName" value="${esc(f?.name || '')}" placeholder="e.g. Chocolate Sea Salt"></div>
       </div>
+      <div class="row">
+        <div><label>Flavor profile</label><select id="flProfile">
+          <option value="">—</option>
+          <option value="Fruity" ${f?.profile === 'Fruity' ? 'selected' : ''}>🍓 Fruity</option>
+          <option value="Creamy" ${f?.profile === 'Creamy' ? 'selected' : ''}>🥛 Creamy</option></select></div>
+        <div><label>Availability</label><select id="flCommit">
+          <option value="">—</option>
+          <option value="Full-time" ${f?.commitment === 'Full-time' ? 'selected' : ''}>Full-time</option>
+          <option value="Part-time" ${f?.commitment === 'Part-time' ? 'selected' : ''}>Part-time</option></select></div>
+        <div><label>Pricing</label><select id="flPricing">
+          <option value="">—</option>
+          <option value="Everyday" ${f?.pricing === 'Everyday' ? 'selected' : ''}>Everyday — $4</option>
+          <option value="Extra-Special" ${f?.pricing === 'Extra-Special' ? 'selected' : ''}>Extra-Special — $5</option></select></div>
+      </div>
+      <label>📍 Goes to these spot categories</label>
+      <div class="card" style="padding:10px 14px">
+        ${CATS_CACHE.map(c => `<label class="checkline"><input type="checkbox" data-fcat="${c.id}" ${(f?.category_ids || []).includes(c.id) ? 'checked' : ''}> ${esc(c.name)}</label>`).join('')}
+      </div>
       <label>Note (optional)</label><input id="flNote" value="${esc(f?.note || '')}" placeholder="e.g. vegan · pack 2 cases">
       <label class="checkline" style="margin-top:10px"><input type="checkbox" id="flStock" ${f ? (f.in_stock ? 'checked' : '') : 'checked'}> In stock</label>
       <button class="btn teal" id="flGo" style="width:100%;margin-top:14px">Save flavor</button>`);
@@ -1723,6 +1875,10 @@ async function renderFlavors(body) {
       const payload = {
         name: bg.querySelector('#flName').value, emoji: bg.querySelector('#flEmoji').value,
         note: bg.querySelector('#flNote').value, in_stock: bg.querySelector('#flStock').checked,
+        profile: bg.querySelector('#flProfile').value || null,
+        commitment: bg.querySelector('#flCommit').value || null,
+        pricing: bg.querySelector('#flPricing').value || null,
+        category_ids: [...bg.querySelectorAll('[data-fcat]:checked')].map(el => Number(el.dataset.fcat)),
       };
       try {
         await api(f ? '/api/flavors/' + f.id : '/api/flavors', { method: f ? 'PUT' : 'POST', json: payload });
@@ -1753,7 +1909,7 @@ async function renderUsers(body) {
     <p style="color:var(--ink-soft);font-size:14px;margin:0 0 6px">Use each person's <b>Square email</b> so their shifts sync automatically.${rank(ME) === 1 ? ' As a manager you can add and manage Slingers.' : ''}</p>
     ${users.map(u => `
       <div class="mrow">
-        <div style="font-size:24px">${u.level === 'admin' ? '👑' : u.level === 'manager' ? '🧭' : '🍭'}</div>
+        <div>${u.avatar ? `<img class="avatar-sm" src="/api/photos/${u.avatar}" alt="">` : `<span style="font-size:24px">${u.level === 'admin' ? '👑' : u.level === 'manager' ? '🧭' : '🍭'}</span>`}</div>
         <div class="info"><b>${esc(u.name)}</b>
           <span>${esc(u.email)} · ${LEVELS[u.level]}${u.job_role ? ' · ' + esc(u.job_role) : ''}${(u.territory_names || []).length ? ' · 🗺️ ' + u.territory_names.map(esc).join(', ') : ''}${u.location_name ? ' · ' + esc(u.location_name) : ''}${u.square_team_member_id ? ' · ⬛' : ''}</span></div>
         ${canEdit(u) ? `<button class="btn ghost small" data-edit="${u.id}">Edit</button>` : ''}
@@ -1868,7 +2024,7 @@ async function renderChatList(body) {
   body.querySelector('#newDm').onclick = async () => {
     const list = await api('/api/chat/people');
     const bg = modal(`<h2>New direct message</h2>
-      ${list.map(x => `<div class="mrow" style="cursor:pointer" data-u="${x.id}"><div style="font-size:20px">${x.level === 'admin' ? '👑' : x.level === 'manager' ? '🧭' : '🍭'}</div><div class="info"><b>${esc(x.name)}</b></div></div>`).join('')}`);
+      ${list.map(x => `<div class="mrow" style="cursor:pointer" data-u="${x.id}"><div>${x.avatar ? `<img class="avatar-sm" src="/api/photos/${x.avatar}" alt="">` : `<span style="font-size:20px">${x.level === 'admin' ? '👑' : x.level === 'manager' ? '🧭' : '🍭'}</span>`}</div><div class="info"><b>${esc(x.name)}</b></div></div>`).join('')}`);
     bg.querySelectorAll('[data-u]').forEach(row => row.onclick = async () => {
       const ch = await api('/api/chat/dm', { method: 'POST', json: { user_id: Number(row.dataset.u) } });
       bg.remove(); CHAT_CHANNEL = ch.id; CHAT_LAST_ID = 0; renderChat(body);

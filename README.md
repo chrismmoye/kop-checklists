@@ -49,7 +49,7 @@ Open http://localhost:3000 — admin login: **chris.moye@kingofpops.com / popsic
 2. When a shift **starts**, the worker's ☀️ **Opening checklist** pops up on their phone.
 3. **30 minutes before shift end**, the 🌙 **Closing checklist** appears.
 4. Each checklist is due **1 hour after it appears**. After that it's **overdue** and every **notifier** for that cart gets an in-app alert + phone push notification.
-5. The **Dashboard** lists every spot with its status — 🟢 Open · ⚫ Closed · 🟡 Not opened yet · 🔴 Needs attention · ⚪ No shift today — sorted so problems float to the top. Tap any spot to see who is working it, their clock-in times, each checklist with answers, and the day's setup photos.
+5. The **Dashboard** lists every spot in one box with a status light — 🟢 blinking = open now · 🟢 solid = closed with all checklists complete · 🟡 = clocked out but checklists missing · 🔴 = scheduled but never opened · ⚪ = no shift today. It also lists every spot with its status — 🟢 Open · ⚫ Closed · 🟡 Not opened yet · 🔴 Needs attention · ⚪ No shift today — sorted so problems float to the top. Tap any spot to see who is working it, their clock-in times, each checklist with answers, and the day's setup photos.
 
 ## Connecting Square
 
@@ -68,7 +68,19 @@ Open http://localhost:3000 — admin login: **chris.moye@kingofpops.com / popsic
 
 ## Flavor strategy
 
-🍦 Flavors (managers + admins): keep the in-stock list current, then assign flavors to each spot (Spots → edit a spot). When a slinger is on a shift at that spot, their home screen shows the **Flavors to pack** card.
+🍦 Flavors (managers + admins): each flavor has a **profile** (Fruity / Creamy), **availability** (Full-time / Part-time), **pricing** (Everyday $4 / Extra-Special $5), and in-stock status. Assign a flavor to whole **spot categories** right from the flavor form (fastest), or to individual spots when editing a spot — a spot's pack list merges both. The strategy board appears on the dashboard under Announcements, and slingers see their **Flavors to pack** card when they're on a shift at that spot.
+
+## Flagged answers
+
+Every checklist question can be set to flag an answer for review — in the builder, each item has a **⚑ flag rule**: never flag, the automatic rule for its type (number outside its OK range, a "No" answer, an unchecked box), or **specific answers** you list (e.g. flag `Needs repair, Okay`). The dashboard's "Flagged answers" stat is clickable and shows each flag with the question, the answer, who submitted it, the spot, the shift time, and the expected range — tap through to the full checklist.
+
+## Wasted pops
+
+Everyone has a **🗑️ Log wasted pops** button at the bottom of their checklist screen: how many, and why (Melted / Expired / Opened). Admins get a **Waste Log** view in Reports with total pops wasted, top waster, top reason, breakdowns by reason and spot, and every entry with date, time, person, count, reason, and spot.
+
+## Profile photos
+
+Anyone can tap their avatar in the ☰ menu to upload a photo of themselves; it replaces the placeholder in the menu, the team list, and DM lists.
 
 ## Populating checklists manually
 
