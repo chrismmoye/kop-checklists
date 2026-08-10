@@ -382,3 +382,7 @@ table.grid tr.clickable:hover { background: #fffbf2; }
 .avatar-fallback { display: flex; width: 46px; height: 46px; border-radius: 50%; background: var(--brand); color: #fff; font-weight: 800; font-size: 19px; align-items: center; justify-content: center; }
 .avatar-edit { position: absolute; right: -2px; bottom: -2px; background: #fff; border-radius: 50%; width: 19px; height: 19px; font-size: 10px; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow); }
 .avatar-sm { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; display: block; }
+
+/* view-as preview banner */
+.preview-bar { background: var(--ink); color: #fff; font-size: 13px; font-weight: 800; padding: 7px 14px; text-align: center; }
+.preview-bar button { background: var(--yellow); color: var(--ink); border: none; border-radius: 999px; padding: 3px 12px; font-weight: 800; font-size: 12px; margin-left: 6px; }

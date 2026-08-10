@@ -238,6 +238,7 @@ function templatesFor(type, shift) {
   const user = userById(shift.user_id);
   return data.checklists.filter(c => {
     if (!c.active || c.trigger !== type) return false;
+    if ((c.user_ids || []).length) return c.user_ids.includes(shift.user_id);
     if (c.job_role && user && user.job_role && c.job_role !== user.job_role) return false;
     if (c.location_id && shift.cart_id && c.location_id !== shift.cart_id) return false;
     if (c.category_id) {

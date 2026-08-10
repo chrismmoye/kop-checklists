@@ -152,26 +152,41 @@ on('POST', '/api/logout', (req, res) => {
   res.setHeader('Set-Cookie', 'kop_session=; Path=/; HttpOnly; Max-Age=0');
   send(res, 200, { ok: true });
 });
-on('GET', '/api/me', (req, res) => send(res, 200, { user: req.user ? publicUser(req.user) : null }));
+on('GET', '/api/me', (req, res) => send(res, 200, {
+  user: req.user ? publicUser(req.user) : null,
+  preview: req.previewLevel || null,
+  real_level: req.realUser ? req.realUser.level : null,
+}));
+// admins can preview the app as a manager or slinger (no dummy account needed)
+on('POST', '/api/preview', (req, res) => {
+  if (!req.realUser || req.realUser.level !== 'admin') return send(res, 403, { error: 'Admins only' });
+  const lvl = (req.body || {}).level;
+  if (lvl === 'manager' || lvl === 'slinger') {
+    res.setHeader('Set-Cookie', `kop_preview=${lvl}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${8 * 3600}`);
+    return send(res, 200, { ok: true, preview: lvl });
+  }
+  res.setHeader('Set-Cookie', 'kop_preview=; Path=/; HttpOnly; Max-Age=0');
+  send(res, 200, { ok: true, preview: null });
+}, { auth: true });
 on('POST', '/api/me/avatar', (req, res) => {
   const b = req.body || {};
   if (!b.image) return send(res, 400, { error: 'No image' });
   try {
     const saved = saveDataUrl(b.image, 'avatar.jpg');
     if (!saved) return send(res, 400, { error: 'Bad image' });
-    req.user.avatar = saved.fname; save();
+    req.realUser.avatar = saved.fname; save();
     send(res, 200, { ok: true, avatar: saved.fname });
   } catch (e) { send(res, 400, { error: e.message }); }
 }, { auth: true, bigBody: true });
 on('DELETE', '/api/me/avatar', (req, res) => {
-  req.user.avatar = null; save();
+  req.realUser.avatar = null; save();
   send(res, 200, { ok: true });
 }, { auth: true });
 on('POST', '/api/me/password', (req, res) => {
   const { current, next } = req.body || {};
-  if (!verifyPassword(current || '', req.user.password_hash)) return send(res, 400, { error: 'Current password is wrong' });
+  if (!verifyPassword(current || '', req.realUser.password_hash)) return send(res, 400, { error: 'Current password is wrong' });
   if (!next || String(next).length < 6) return send(res, 400, { error: 'New password must be 6+ characters' });
-  req.user.password_hash = hashPassword(next); save();
+  req.realUser.password_hash = hashPassword(next); save();
   send(res, 200, { ok: true });
 }, { auth: true });
 
@@ -242,6 +257,8 @@ on('GET', '/api/today', (req, res) => {
 
   const daily = data.checklists.filter(c => {
     if (!c.active || c.trigger !== 'daily' || !c.days.split(',').includes(dow)) return false;
+    // assigned to specific people (e.g. HQ ops leads) — those people only
+    if ((c.user_ids || []).length) return c.user_ids.includes(u.id);
     if (c.location_id && u.location_id && c.location_id !== u.location_id) return false;
     if (c.job_role && u.job_role && rank(u) === 0 && c.job_role !== u.job_role) return false;
     return true;
@@ -272,6 +289,7 @@ on('GET', '/api/today', (req, res) => {
 // slingers may add checklists for their own job role (or role-agnostic ones); managers+ may add any
 function canPopulate(user, c) {
   if (!c.active) return false;
+  if ((c.user_ids || []).includes(user.id)) return true;
   if (rank(user) >= 1) return true;
   if (!c.job_role) return true;
   return String(c.job_role).toLowerCase() === String(user.job_role || '').toLowerCase();
@@ -895,6 +913,7 @@ on('POST', '/api/checklists', (req, res) => {
     emoji: b.emoji || '📋', trigger: ['opening', 'closing', 'daily'].includes(b.trigger) ? b.trigger : 'daily',
     location_id: b.location_id || null, category_id: b.category_id || null, job_role: b.job_role || null,
     days: b.days || '0,1,2,3,4,5,6', due_time: b.due_time || null, active: 1,
+    user_ids: (b.user_ids || []).map(Number),
     items: items.map(it => ({ ...it, id: nextId('item') })),
   };
   resolveConds(c.items);
@@ -914,6 +933,7 @@ on('PUT', '/api/checklists/:id', (req, res) => {
   if (b.job_role !== undefined) c.job_role = b.job_role || null;
   if (b.days != null) c.days = b.days;
   if (b.due_time !== undefined) c.due_time = b.due_time || null;
+  if (b.user_ids !== undefined) c.user_ids = (b.user_ids || []).map(Number);
   if (b.items) {
     const existing = new Set(c.items.map(i => i.id));
     c.items = normalizeItems(b.items).map(it =>
@@ -928,6 +948,83 @@ on('DELETE', '/api/checklists/:id', (req, res) => {
   if (c) { c.active = 0; save(); }
   send(res, 200, { ok: true });
 }, { level: 'admin' });
+
+function exportChecklist(c) {
+  const byId = id => c.items.find(x => x.id === id);
+  return {
+    name: c.name, emoji: c.emoji, description: c.description, trigger: c.trigger,
+    spot: c.location_id ? ((cartById(c.location_id) || {}).name || null) : null,
+    category: c.category_id ? ((catById(c.category_id) || {}).name || null) : null,
+    job_role: c.job_role || null,
+    assigned_people: (c.user_ids || []).map(id => (userById(id) || {}).name).filter(Boolean),
+    days: c.days, due_time: c.due_time,
+    items: [...c.items].sort((a, b) => a.position - b.position).map(it => ({
+      position: it.position, type: it.type, label: it.label, required: !!it.required,
+      unit: it.unit, ok_min: it.min, ok_max: it.max, options: it.options,
+      show_if: it.cond_item_id ? {
+        question: (byId(it.cond_item_id) || {}).label || '?',
+        operator: it.cond_op || 'eq', value: it.cond_value,
+      } : null,
+      flag_rule: it.flag_mode === 'values' ? `flag when answer is: ${it.flag_values}` :
+        it.flag_mode === 'auto' ? (it.type === 'number' ? 'flag when outside OK range' : it.type === 'yesno' ? 'flag when No' : 'flag when unchecked') : 'never flag',
+    })),
+  };
+}
+const OP_TEXT = { eq: 'is', ne: 'is not', gt: 'is above', gte: 'is at least', lt: 'is below', lte: 'is at most' };
+function checklistMarkdown(c) {
+  const items = [...c.items].sort((a, b) => a.position - b.position);
+  const byId = id => items.find(x => x.id === id);
+  const childrenOf = id => items.filter(x => x.cond_item_id === id);
+  const lines = [];
+  lines.push(`## ${c.emoji || '📋'} ${c.name}`);
+  const meta = [
+    `Trigger: ${c.trigger}`,
+    c.location_id ? `Spot: ${(cartById(c.location_id) || {}).name}` : null,
+    c.category_id ? `Category: ${(catById(c.category_id) || {}).name}` : null,
+    c.job_role ? `Role: ${c.job_role}` : null,
+    (c.user_ids || []).length ? `Assigned: ${c.user_ids.map(id => (userById(id) || {}).name).filter(Boolean).join(', ')}` : null,
+    c.trigger === 'daily' ? `Days: ${c.days}` : null,
+    c.due_time ? `Due by: ${c.due_time}` : null,
+  ].filter(Boolean);
+  lines.push('_' + meta.join(' · ') + '_', '');
+  const render = (it, depth) => {
+    const pad = '  '.repeat(depth);
+    const bits = [`${pad}- **${it.label}** _(${it.type}${it.required ? ', required' : ', optional'})_`];
+    if (it.type === 'number' && (it.min != null || it.max != null)) bits.push(` — OK range ${it.min ?? '−∞'}–${it.max ?? '∞'}${it.unit ? ' ' + it.unit : ''}`);
+    if (it.type === 'choice' && it.options) bits.push(` — options: ${it.options}`);
+    if (it.flag_mode === 'values') bits.push(` — ⚑ flags on: ${it.flag_values}`);
+    else if (it.flag_mode === 'auto') bits.push(' — ⚑ auto-flag');
+    lines.push(bits.join(''));
+    for (const child of childrenOf(it.id)) {
+      lines.push(`${pad}  - ↳ IF *${it.label}* ${OP_TEXT[child.cond_op || 'eq']} **${child.cond_value}** →`);
+      render(child, depth + 2);
+    }
+  };
+  items.filter(it => !it.cond_item_id).forEach(it => render(it, 0));
+  lines.push('');
+  return lines.join('\n');
+}
+on('GET', '/api/checklists/export.json', (req, res) => {
+  const id = Number(req.query.id) || null;
+  const lists = data.checklists.filter(c => c.active && (!id || c.id === id));
+  const body = JSON.stringify({ exported_at: new Date().toISOString(), checklists: lists.map(exportChecklist) }, null, 2);
+  res.writeHead(200, {
+    'Content-Type': 'application/json',
+    'Content-Disposition': `attachment; filename="kop-checklists${id ? '-' + id : ''}.json"`,
+  });
+  res.end(body);
+}, { level: 'manager' });
+on('GET', '/api/checklists/export.md', (req, res) => {
+  const id = Number(req.query.id) || null;
+  const lists = data.checklists.filter(c => c.active && (!id || c.id === id));
+  const body = `# King of Pops — Checklists\n_Exported ${new Date().toLocaleString('en-US', { timeZone: TZ })}_\n\n` +
+    lists.map(checklistMarkdown).join('\n---\n\n');
+  res.writeHead(200, {
+    'Content-Type': 'text/markdown; charset=utf-8',
+    'Content-Disposition': `attachment; filename="kop-checklists${id ? '-' + id : ''}.md"`,
+  });
+  res.end(body);
+}, { level: 'manager' });
 
 // ---------- shifts / schedule ----------
 on('GET', '/api/shifts', (req, res) => {
@@ -1289,6 +1386,7 @@ function dailyRows(date, terrFilter) {
     let targets;
     if (c.location_id) { const l = cartById(c.location_id); targets = l ? [l] : []; }
     else if (c.category_id) targets = activeCarts().filter(l => l.category_id === c.category_id);
+    else if ((c.user_ids || []).length) targets = [{ id: null, name: '👥 assigned team' }];
     else targets = activeCarts();
     if (terrFilter) targets = targets.filter(l => terrFilter.has(l.id));
     if (!targets.length && !terrFilter) targets = [{ id: null, name: '—' }];
@@ -1905,7 +2003,17 @@ const server = http.createServer((req, res) => {
   req.params = Object.fromEntries(route.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
 
   const sess = readSession(req);
-  req.user = sess ? data.users.find(x => x.id === sess.uid && x.active) || null : null;
+  const realUser = sess ? data.users.find(x => x.id === sess.uid && x.active) || null : null;
+  req.realUser = realUser;
+  req.user = realUser;
+  if (realUser && realUser.level === 'admin') {
+    const pc = (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith('kop_preview='));
+    const pv = pc ? pc.slice('kop_preview='.length) : null;
+    if (pv === 'manager' || pv === 'slinger') {
+      req.previewLevel = pv;
+      req.user = { ...realUser, level: pv };   // downgrade only — never escalate
+    }
+  }
   const needsAuth = route.auth || route.level;
   if (needsAuth && !req.user) return send(res, 401, { error: 'Not signed in' });
   if (route.level && rank(req.user) < RANK[route.level])

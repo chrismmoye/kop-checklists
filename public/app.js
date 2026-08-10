@@ -6,6 +6,7 @@ let DASH_DATE = null, DASH_TERR = undefined;
 let SCHED_DATE = null;
 let UNREAD = 0;
 let CHAT_CHANNEL = null, CHAT_LAST_ID = 0, CHAT_TIMER = null;
+let PREVIEW = null, REAL_LEVEL = null;
 
 // ---------- utils ----------
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -147,6 +148,7 @@ function shell() {
   if (!TAB || !tabs.some(t => t.startsWith(TAB + '|'))) TAB = tabs[0].split('|')[0];
   const current = tabs.find(t => t.startsWith(TAB + '|'));
   $app.innerHTML = `
+  ${PREVIEW ? `<div class="preview-bar">👁️ Viewing as <b>${esc(PREVIEW)}</b> — <button id="exitPreview">back to admin</button></div>` : ''}
   <div class="rainbow"></div>
   <header class="topbar"><div class="topbar-inner">
     <button class="hamburger" id="menuBtn">☰</button>
@@ -166,6 +168,8 @@ function shell() {
       </div>
       ${tabs.map(t => { const [k, l] = t.split('|'); return `<button class="drawer-item ${TAB === k ? 'active' : ''}" data-tab="${k}">${l}</button>`; }).join('')}
       <div class="drawer-foot">
+        <button class="drawer-item" id="wasteMenuBtn">🗑️ Log wasted pops</button>
+        ${REAL_LEVEL === 'admin' ? `<button class="drawer-item" id="viewAsBtn">👁️ View app as…${PREVIEW ? ` <span class="pill yellow">${PREVIEW}</span>` : ''}</button>` : ''}
         <button class="drawer-item" id="pwBtn">🔑 Change my password</button>
         <button class="drawer-item" id="logoutBtn">🚪 Sign out</button>
       </div>
@@ -174,11 +178,26 @@ function shell() {
   <div class="container">
     <div id="body"></div>
   </div>`;
+  const exitBtn = document.getElementById('exitPreview');
+  if (exitBtn) exitBtn.onclick = async () => { await api('/api/preview', { method: 'POST', json: { level: null } }); location.reload(); };
   const drawerBg = document.getElementById('drawerBg');
   document.getElementById('menuBtn').onclick = () => { drawerBg.hidden = false; requestAnimationFrame(() => drawerBg.classList.add('open')); };
   const closeDrawer = () => { drawerBg.classList.remove('open'); setTimeout(() => drawerBg.hidden = true, 200); };
   drawerBg.onclick = e => { if (e.target === drawerBg) closeDrawer(); };
   document.getElementById('logoutBtn').onclick = async () => { await api('/api/logout', { method: 'POST' }); ME = null; renderLogin(); };
+  document.getElementById('wasteMenuBtn').onclick = () => { closeDrawer(); wasteModal(null); };
+  const viewAsEl = document.getElementById('viewAsBtn');
+  if (viewAsEl) viewAsEl.onclick = () => {
+    const bg = modal(`<h2>👁️ View the app as…</h2>
+      <p style="color:var(--ink-soft);font-size:14px">See exactly what your team sees — menus, permissions and all. Your own account stays admin; switch back any time.</p>
+      ${[['', '👑 Admin (me)'], ['manager', '🧭 Manager'], ['slinger', '🍭 Slinger']].map(([v, l]) =>
+        `<div class="mrow" style="cursor:pointer" data-view="${v}"><div class="info"><b>${l}</b></div>${(PREVIEW || '') === v ? '<span class="pill green">current</span>' : ''}</div>`).join('')}`);
+    bg.querySelectorAll('[data-view]').forEach(row => row.onclick = async () => {
+      await api('/api/preview', { method: 'POST', json: { level: row.dataset.view || null } });
+      bg.remove();
+      location.reload();
+    });
+  };
   const avFile = document.getElementById('avatarFile');
   document.getElementById('avatarBtn').onclick = () => avFile.click();
   avFile.onchange = async () => {
@@ -250,7 +269,7 @@ function renderLogin() {
         return;
       }
       const { user } = await api('/api/login', { method: 'POST', json: { email: f.get('email'), password: f.get('password') } });
-      ME = user; TAB = null;
+      ME = user; REAL_LEVEL = user.level; PREVIEW = null; TAB = null;
       shell();
     } catch (err) { toast(err.message, true); }
   };
@@ -1451,12 +1470,17 @@ async function renderSchedule(body) {
 }
 
 // ================= CHECKLISTS (admin) =================
+let USERS_CACHE = [];
 async function renderChecklistAdmin(body) {
-  const [lists, carts, cats] = await Promise.all([api('/api/checklists'), api('/api/locations'), api('/api/categories')]);
+  const [lists, carts, cats, users] = await Promise.all([
+    api('/api/checklists'), api('/api/locations'), api('/api/categories'), api('/api/users').catch(() => [])]);
+  USERS_CACHE = users;
   const trigLabel = { opening: '☀️ Opening (start of shift)', closing: '🌙 Closing (30 min before end)', daily: '📅 Daily schedule' };
   const isAdminCl = rank(ME) === 2;
   body.innerHTML = `
     <div class="section-head"><h2>Checklists</h2><div class="spacer"></div>
+      <a class="btn ghost small" style="text-decoration:none" href="/api/checklists/export.md" download>⬇️ Export (readable)</a>
+      <a class="btn ghost small" style="text-decoration:none" href="/api/checklists/export.json" download>⬇️ Export (JSON)</a>
       ${isAdminCl ? '<button class="btn" id="newCl">+ New checklist</button>' : '<span class="pill teal">Managers can edit — admins add/delete</span>'}</div>
     ${lists.map(c => `
       <div class="mrow">
@@ -1464,7 +1488,8 @@ async function renderChecklistAdmin(body) {
         <div class="info"><b>${esc(c.name)}</b>
           <span>${trigLabel[c.trigger] || c.trigger} ·
           ${c.location_id ? esc(c.location_name) : c.category_id ? esc(c.category_name) + ' (category)' : 'All spots'} ·
-          ${c.job_role ? esc(c.job_role) : 'All roles'}${c.trigger === 'daily' ? ' · ' + (c.days.split(',').length === 7 ? 'Daily' : c.days.split(',').map(d => DAY_NAMES[d]).join(', ')) + (c.due_time ? ' · due ' + c.due_time : '') : ''} · ${c.items.length} items</span></div>
+          ${(c.user_ids || []).length ? '👥 ' + c.user_ids.length + ' assigned' : c.job_role ? esc(c.job_role) : 'All roles'}${c.trigger === 'daily' ? ' · ' + (c.days.split(',').length === 7 ? 'Daily' : c.days.split(',').map(d => DAY_NAMES[d]).join(', ')) + (c.due_time ? ' · due ' + c.due_time : '') : ''} · ${c.items.length} items</span></div>
+        <a class="btn ghost small" style="text-decoration:none" href="/api/checklists/export.md?id=${c.id}" download title="Export this checklist with its logic tree">⬇️</a>
         <button class="btn ghost small" data-edit="${c.id}">Edit</button>
         ${isAdminCl ? `<button class="btn danger small" data-del="${c.id}">Delete</button>` : ''}
       </div>`).join('') || '<div class="empty"><div class="big">📋</div>No checklists yet — create your first!</div>'}
@@ -1511,6 +1536,10 @@ function checklistBuilder(cl, carts, cats, onSave) {
       <div><label>…or category</label><select id="clCat"><option value="">Any category</option>
         ${cats.map(c => `<option value="${c.id}" ${cl?.category_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
       <div><label>Role (blank = everyone)</label><input id="clRole" value="${esc(cl?.job_role || '')}" placeholder="e.g. Cart Operator"></div>
+    </div>
+    <label>👥 Or assign to specific people (e.g. HQ ops leads) — overrides role/spot</label>
+    <div class="card" style="padding:10px 14px;max-height:170px;overflow-y:auto">
+      ${USERS_CACHE.map(u => `<label class="checkline"><input type="checkbox" data-cluser="${u.id}" ${(cl?.user_ids || []).includes(u.id) ? 'checked' : ''}> ${esc(u.name)}${u.job_role ? ' · ' + esc(u.job_role) : ''}</label>`).join('')}
     </div>
     <div id="dailyOpts" style="${trigger === 'daily' ? '' : 'display:none'}">
       <div class="row"><div><label>Due by</label><input type="time" id="clDue" value="${cl?.due_time || ''}"></div><div></div></div>
@@ -1656,6 +1685,7 @@ function checklistBuilder(cl, carts, cats, onSave) {
       job_role: bg.querySelector('#clRole').value.trim() || null,
       due_time: trigger === 'daily' ? (bg.querySelector('#clDue').value || null) : null,
       days: trigger === 'daily' ? days.sort().join(',') : '0,1,2,3,4,5,6',
+      user_ids: [...bg.querySelectorAll('[data-cluser]:checked')].map(el => Number(el.dataset.cluser)),
       items: items.filter(i => i.label && String(i.label).trim()),
     };
     if (!payload.name) return toast('Give it a name', true);
@@ -2129,7 +2159,7 @@ async function renderConversation(body) {
   if (linkToken) {
     try {
       const { user } = await api('/api/login/verify', { method: 'POST', json: { token: linkToken } });
-      ME = user;
+      ME = user; REAL_LEVEL = user.level;
       history.replaceState({}, '', '/');
       shell();
       toast('Signed in 🍭');
@@ -2138,8 +2168,8 @@ async function renderConversation(body) {
     } catch (e) { history.replaceState({}, '', '/'); setTimeout(() => toast(e.message, true), 400); }
   }
   try {
-    const { user } = await api('/api/me');
-    ME = user;
+    const me = await api('/api/me');
+    ME = me.user; PREVIEW = me.preview; REAL_LEVEL = me.real_level;
   } catch { }
   if (ME) shell(); else renderLogin();
   setInterval(refreshBell, 60000);

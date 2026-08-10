@@ -76,7 +76,19 @@ Every checklist question can be set to flag an answer for review — in the buil
 
 ## Wasted pops
 
-Everyone has a **🗑️ Log wasted pops** button at the bottom of their checklist screen: how many, and why (Melted / Expired / Opened). Admins get a **Waste Log** view in Reports with total pops wasted, top waster, top reason, breakdowns by reason and spot, and every entry with date, time, person, count, reason, and spot.
+Everyone can log waste from the ☰ menu → **🗑️ Log wasted pops** (also at the bottom of the checklist screen): how many, and why (Melted / Expired / Opened). Admins get a **Waste Log** view in Reports with total pops wasted, top waster, top reason, breakdowns by reason and spot, and every entry with date, time, person, count, reason, and spot.
+
+## View as (admins)
+
+☰ menu → **👁️ View app as…** → Manager or Slinger. The whole app — menus, permissions, API access — behaves exactly as that level, so you can check the team's experience without a dummy account. A black banner across the top shows you're previewing; tap "back to admin" to exit. Your real account stays admin, and preview can only downgrade, never escalate.
+
+## HQ (or any team-specific) checklists
+
+Create a spot for **HQ**, then build a daily checklist scoped to it and use **👥 Assign to specific people** in the builder to pick your ops leads. Assigned people get it every day regardless of role or home spot; nobody else sees it. This works for shift-triggered checklists too.
+
+## Exporting checklists
+
+Checklists menu → **⬇️ Export (readable)** gives a Markdown outline that shows the full logic tree — each conditional question nested under the answer that triggers it, with OK ranges, options, and flag rules. **⬇️ Export (JSON)** gives the machine-readable definition (`show_if` + `flag_rule` per item) for handing to another system. The ⬇️ on any single checklist row exports just that one. Both are available at `GET /api/checklists/export.md` and `GET /api/checklists/export.json` (add `?id=` for one).
 
 ## Profile photos
 
